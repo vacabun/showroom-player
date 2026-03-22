@@ -1,30 +1,31 @@
-# showroom-fetcher
+# showroom-player
 
-A simple desktop GUI for fetching [SHOWROOM](https://www.showroom-live.com) live stream URLs and launching them in VLC.
+A desktop GUI player for watching [SHOWROOM](https://www.showroom-live.com) live streams.
 
 ## Features
 
-- Fetch all available streams (HLS, WebRTC) by room URL or key
-- Expands HLS adaptive streams into individual quality options with bitrate, resolution, frame rate, and codec info
-- One-click copy URL or open in VLC per stream
+- Open a SHOWROOM room by URL or room key and start playback directly in the app
+- Expand HLS adaptive streams into individual quality options with bitrate, resolution, and frame rate
+- Browse live rooms, switch stream quality, and watch comments in real time
+- Log in from the embedded browser to send comments while watching
 
 ## Requirements
 
 - Python 3
-- [VLC](https://www.videolan.org/vlc/)
+- Qt WebEngine support through `PySide6`
 
 ## Setup
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install requests m3u8 PyQt5
+pip install -r requirements.txt
 ```
 
 ## Usage
 
 ```bash
-python fetcher.py
+python main.py
 ```
 
 Enter a room URL or key, e.g.:
@@ -32,4 +33,4 @@ Enter a room URL or key, e.g.:
 - `https://www.showroom-live.com/r/ROOM_KEY`
 - `ROOM_KEY`
 
-Click **Fetch**, then use the **VLC** button on any stream row to start playback, or **Copy URL** to use with another player.
+Click **Open** to start playback. You can then switch stream quality from the player controls, browse live rooms on the left, and join the chat after signing in.

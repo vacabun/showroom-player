@@ -1,4 +1,4 @@
-name: Build Fetcher Executables
+name: Build Showroom Player Executables
 
 on:
   push:
@@ -12,11 +12,11 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact_name: fetcher.exe
-            asset_name: fetcher_windows_amd64.exe
+            artifact_name: showroom-player.exe
+            asset_name: showroom-player_windows_amd64.exe
           - os: macos-latest
-            artifact_name: fetcher
-            asset_name: fetcher_macos_arm64
+            artifact_name: showroom-player
+            asset_name: showroom-player_macos_arm64
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -38,9 +38,10 @@ jobs:
       - name: Build with PyInstaller
         run: |
           # --onefile: 导出为单文件
-          # --name: 指定程序名为 fetcher
+          # --name: 指定程序名为 showroom-player
           # --windowed: 如果是 GUI 程序请保留，纯命令行程序可以删掉该参数
-          pyinstaller --onefile --windowed --name fetcher fetcher.py
+          # 入口脚本已改为 main.py
+          pyinstaller --onefile --windowed --name showroom-player main.py
         shell: bash
 
       - name: Rename for Release

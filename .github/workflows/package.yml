@@ -12,11 +12,13 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact_name: showroom-player.exe
-            asset_name: showroom-player_windows_amd64.exe
+            build_cmd: pyinstaller --onefile --windowed --name showroom-player main.py
+            release_path: dist/showroom-player_windows_amd64.zip
+            asset_name: showroom-player_windows_amd64.zip
           - os: macos-latest
-            artifact_name: showroom-player
-            asset_name: showroom-player_macos_arm64
+            build_cmd: pyinstaller --windowed --name showroom-player main.py
+            release_path: dist/showroom-player_macos_arm64.app.zip
+            asset_name: showroom-player_macos_arm64.app.zip
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -37,21 +39,24 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          # --onefile: 导出为单文件
-          # --name: 指定程序名为 showroom-player
-          # --windowed: 如果是 GUI 程序请保留，纯命令行程序可以删掉该参数
-          # 入口脚本已改为 main.py
-          pyinstaller --onefile --windowed --name showroom-player main.py
+          ${{ matrix.build_cmd }}
         shell: bash
 
-      - name: Rename for Release
+      - name: Package macOS App
+        if: runner.os == 'macOS'
         run: |
-          mv dist/${{ matrix.artifact_name }} dist/${{ matrix.asset_name }}
+          ditto -c -k --sequesterRsrc --keepParent dist/showroom-player.app dist/${{ matrix.asset_name }}
+        shell: bash
+
+      - name: Package Windows Executable
+        if: runner.os == 'Windows'
+        run: |
+          powershell -Command "Compress-Archive -Path dist/showroom-player.exe -DestinationPath dist/${{ matrix.asset_name }} -Force"
         shell: bash
 
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.asset_name }}
+          files: ${{ matrix.release_path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -28,6 +28,21 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Packaging
+
+### macOS
+
+Do not use `--onefile` on macOS. Building an `.app` bundle starts faster and can be moved into `/Applications` directly.
+
+```bash
+source .venv/bin/activate
+pip install pyinstaller
+pyinstaller --windowed --name showroom-player main.py
+ditto -c -k --sequesterRsrc --keepParent dist/showroom-player.app dist/showroom-player_macos_arm64.app.zip
+```
+
+The generated app bundle is `dist/showroom-player.app`. The release artifact should be `dist/showroom-player_macos_arm64.app.zip`.
+
 Enter a room URL or key, e.g.:
 
 - `https://www.showroom-live.com/r/ROOM_KEY`

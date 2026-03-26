@@ -5,4 +5,15 @@ __pycache__/
 .DS_Store
 build/
 dist/
+.pyinstaller-cache/
 loc
+*.spec
+*.egg-info/
+.idea/
+.vscode/
+*.log
+*.bak
+*.swp
+*.tmp
+*.env
+.env.*

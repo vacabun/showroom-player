@@ -1,5 +1,6 @@
 import time
 import json
+from pathlib import Path
 import requests
 import m3u8
 from urllib.parse import urlparse
@@ -18,6 +19,89 @@ fake_headers = {
 
 session = requests.Session()
 session.headers.update(fake_headers)
+COOKIE_CACHE_PATH = Path.home() / '.showroom-player' / 'session-cookies.json'
+DEFAULT_COOKIE_DOMAIN = 'www.showroom-live.com'
+
+
+def save_session_cookies():
+    COOKIE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = []
+    for cookie in session.cookies:
+        payload.append({
+            'name': cookie.name,
+            'value': cookie.value,
+            'domain': cookie.domain or '',
+            'path': cookie.path or '/',
+            'secure': bool(cookie.secure),
+            'expires': cookie.expires,
+        })
+    COOKIE_CACHE_PATH.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding='utf-8',
+    )
+
+
+def load_session_cookies():
+    if not COOKIE_CACHE_PATH.exists():
+        return False
+    try:
+        payload = json.loads(COOKIE_CACHE_PATH.read_text(encoding='utf-8'))
+    except Exception:
+        return False
+
+    session.cookies.clear()
+    for item in payload:
+        set_session_cookie(
+            item.get('name', ''),
+            item.get('value', ''),
+            item.get('domain', ''),
+            item.get('path') or '/',
+            secure=bool(item.get('secure', False)),
+            expires=item.get('expires'),
+        )
+    return True
+
+
+def clear_session_cookies():
+    session.cookies.clear()
+    try:
+        COOKIE_CACHE_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def fetch_current_user():
+    resp = session.get('https://www.showroom-live.com/api/current_user', timeout=10)
+    data = resp.json()
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def fetch_current_user_name():
+    data = fetch_current_user()
+    if not data.get('is_login'):
+        return ''
+    return (
+        data.get('account_id')
+        or data.get('name')
+        or data.get('user_name')
+        or data.get('user', {}).get('account_id', '')
+    )
+
+
+def set_session_cookie(name, value, domain='', path='/', secure=False, expires=None):
+    cookie_kwargs = {
+        'path': path or '/',
+        'secure': bool(secure),
+        'expires': expires,
+    }
+    normalized_domain = (domain or '').strip()
+    if normalized_domain:
+        cookie_kwargs['domain'] = normalized_domain
+    else:
+        cookie_kwargs['domain'] = DEFAULT_COOKIE_DOMAIN
+    session.cookies.set(name, value, **cookie_kwargs)
 
 
 def parse_room_url_key(input_text):

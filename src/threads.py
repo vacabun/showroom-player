@@ -2,6 +2,7 @@ import time
 from PySide6.QtCore import QThread, Signal
 
 from .api import (
+    fetch_current_user,
     get_all_streams,
     get_raw_stream_list,
     get_roomid_by_room_url_key,
@@ -144,16 +145,12 @@ class SendCommentThread(QThread):
             self.error.emit(str(e))
 
 
-class LoadUsernameThread(QThread):
-    done = Signal(str)
+class LoadCurrentUserThread(QThread):
+    done = Signal(dict, bool)
 
     def run(self):
         try:
-            resp = session.get('https://www.showroom-live.com/api/user/profile', timeout=10)
-            data = resp.json()
-            name = (data.get('account_id')
-                    or data.get('name')
-                    or data.get('user', {}).get('account_id', ''))
-            self.done.emit(name or 'User')
+            data = fetch_current_user()
+            self.done.emit(data, bool(data.get('is_login')))
         except Exception:
-            self.done.emit('User')
+            self.done.emit({}, False)

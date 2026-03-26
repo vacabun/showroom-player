@@ -26,19 +26,21 @@ from PySide6.QtWidgets import (
     QGridLayout,
 )
 
-from .api import session
-from .dialogs import LoginDialog
+from .api import clear_session_cookies, load_session_cookies, save_session_cookies
+from .dialogs import LoginDialog, UserInfoDialog
+from .recording import StreamRecorder
 from .threads import (
     LiveCommentsThread,
+    LoadCurrentUserThread,
     LiveRoomsThread,
     LoadRoomThread,
-    LoadUsernameThread,
     SendCommentThread,
 )
 
 
 class MultiRoomTile(QWidget):
     selected = Signal(int)
+    recording_notice = Signal(str)
 
     def __init__(self, index):
         super().__init__()
@@ -67,11 +69,20 @@ class MultiRoomTile(QWidget):
         self.title_label.setFont(QFont('Menlo', 10))
         self.meta_label = QLabel('Empty')
         self.meta_label.setFont(QFont('Menlo', 9))
+        self.record_indicator = QLabel()
+        self.record_indicator.setFixedSize(10, 10)
+        self.record_btn = QPushButton('Start REC')
+        self.record_btn.setFixedWidth(88)
+        self.record_btn.setEnabled(False)
+        self.record_btn.clicked.connect(self._toggle_recording)
         header.addWidget(self.indicator_label)
         header.addSpacing(4)
         header.addWidget(self.title_label)
         header.addStretch()
         header.addWidget(self.meta_label)
+        header.addSpacing(8)
+        header.addWidget(self.record_indicator)
+        header.addWidget(self.record_btn)
         layout.addLayout(header)
 
         self.video_widget = QVideoWidget()
@@ -119,6 +130,11 @@ class MultiRoomTile(QWidget):
         self.player.setVideoOutput(self.video_widget)
         self.player.errorOccurred.connect(self._on_player_error)
         self.player.playbackStateChanged.connect(self._on_playback_state_changed)
+        self.recorder = StreamRecorder(self)
+        self.recorder.state_changed.connect(self._update_record_ui)
+        self.recorder.started.connect(self._on_recording_started)
+        self.recorder.stopped.connect(self._on_recording_stopped)
+        self.recorder.error.connect(self._on_recording_error)
 
         for widget in (
             self,
@@ -127,6 +143,7 @@ class MultiRoomTile(QWidget):
             self.meta_label,
             self.status_label,
             self.indicator_label,
+            self.record_indicator,
         ):
             widget.installEventFilter(self)
 
@@ -146,6 +163,7 @@ class MultiRoomTile(QWidget):
         combo_bg = MainWindow._mix_colors(base, window, 0.18)
         button_bg = MainWindow._mix_colors(combo_bg, highlight, 0.04)
         button_hover = MainWindow._mix_colors(combo_bg, highlight, 0.10)
+        recording = self.recorder.is_recording()
         bg = selected_bg if self._selected else panel_bg
         border_color = active_border if self._selected else soft_border
         self.setStyleSheet(
@@ -174,6 +192,14 @@ class MultiRoomTile(QWidget):
             f'border: 1px solid {active_border if self._selected else soft_border};'
             'border-radius: 5px;'
         )
+        record_fill = '#e74c3c' if recording else MainWindow._color_to_css(
+            MainWindow._mix_colors(border, window, 0.34)
+        )
+        self.record_indicator.setStyleSheet(
+            f'background: {record_fill};'
+            f'border: 1px solid {active_border if recording else soft_border};'
+            'border-radius: 5px;'
+        )
         self.title_label.setStyleSheet(f'color: {title_color}; font-weight: 700;')
         self.meta_label.setStyleSheet(f'color: {meta_color};')
         self.status_label.setStyleSheet(f'color: {body_color};')
@@ -187,6 +213,25 @@ class MultiRoomTile(QWidget):
             '}'
             'QPushButton:hover {'
             f' background: {MainWindow._color_to_css(button_hover)};'
+            '}'
+            'QPushButton:disabled {'
+            f' color: {MainWindow._color_to_rgba(text, 110)};'
+            f' background: {MainWindow._color_to_rgba(combo_bg, 180)};'
+            '}'
+        )
+        record_button_bg = '#b63a30' if recording else MainWindow._color_to_css(button_bg)
+        record_button_hover = '#cf473c' if recording else MainWindow._color_to_css(button_hover)
+        record_button_text = 'white' if recording else title_color
+        record_button_style = (
+            'QPushButton {'
+            f' background: {record_button_bg};'
+            f' color: {record_button_text};'
+            f' border: 1px solid {active_border if recording else soft_border};'
+            ' border-radius: 10px;'
+            ' padding: 6px 8px;'
+            '}'
+            'QPushButton:hover {'
+            f' background: {record_button_hover};'
             '}'
             'QPushButton:disabled {'
             f' color: {MainWindow._color_to_rgba(text, 110)};'
@@ -212,6 +257,7 @@ class MultiRoomTile(QWidget):
         )
         self.play_btn.setStyleSheet(tile_button_style)
         self.stop_btn.setStyleSheet(tile_button_style)
+        self.record_btn.setStyleSheet(record_button_style)
         self.stream_combo.setStyleSheet(combo_style)
         groove_color = MainWindow._color_to_css(MainWindow._mix_colors(border, window, 0.30))
         fill_color = MainWindow._color_to_css(MainWindow._mix_colors(highlight, QColor('#ffffff'), 0.10))
@@ -239,6 +285,7 @@ class MultiRoomTile(QWidget):
         self._selected = selected
 
     def start_loading(self, room_input):
+        self.stop_recording(silent=True)
         self.request_serial += 1
         self.room_key = room_input
         self.room_name = ''
@@ -254,6 +301,7 @@ class MultiRoomTile(QWidget):
         self.play_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
         self.play_btn.setText('▶')
+        self.record_btn.setEnabled(False)
         self.title_label.setText(f'Slot {self.index + 1}')
         self.meta_label.setText('Loading')
         self.status_label.setText(f'Opening {room_input}...')
@@ -279,6 +327,7 @@ class MultiRoomTile(QWidget):
         self.stream_combo.setEnabled(bool(self.streams))
         self.play_btn.setEnabled(bool(self.streams))
         self.stop_btn.setEnabled(bool(self.streams))
+        self.record_btn.setEnabled(bool(self.streams))
         if self.streams:
             self.stream_combo.setCurrentIndex(0)
             self._play_current()
@@ -286,6 +335,7 @@ class MultiRoomTile(QWidget):
             self.status_label.setText('No playable stream found.')
 
     def set_error(self, message):
+        self.stop_recording(silent=True)
         self.room_name = ''
         self.room_id = 0
         self.live_id = 0
@@ -299,11 +349,13 @@ class MultiRoomTile(QWidget):
         self.play_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
         self.play_btn.setText('▶')
+        self.record_btn.setEnabled(False)
         self.title_label.setText(f'Slot {self.index + 1}')
         self.meta_label.setText('Error')
         self.status_label.setText(message)
 
     def clear_tile(self):
+        self.stop_recording(silent=True)
         self.request_serial += 1
         self.room_key = ''
         self.room_name = ''
@@ -319,6 +371,7 @@ class MultiRoomTile(QWidget):
         self.play_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
         self.play_btn.setText('▶')
+        self.record_btn.setEnabled(False)
         self.title_label.setText(f'Slot {self.index + 1}')
         self.meta_label.setText('Empty')
         self.status_label.setText('Double-click a room on the left to load here.')
@@ -385,6 +438,46 @@ class MultiRoomTile(QWidget):
     def _on_volume_changed(self, value):
         self.audio_output.setVolume(value / 100)
 
+    def stop_recording(self, silent=False):
+        self.recorder.stop_recording(silent=silent)
+
+    def wait_for_recording_stop(self):
+        self.recorder.wait_for_stop()
+
+    def _toggle_recording(self):
+        if self.recorder.is_recording():
+            self.stop_recording()
+            return
+        idx = self.stream_combo.currentIndex()
+        if idx < 0 or idx >= len(self.streams):
+            self.recording_notice.emit(f'Tile {self.index + 1} has no stream to record.')
+            return
+        _label, url = self.streams[idx]
+        self.recorder.start_recording(self.room_name or f'slot-{self.index + 1}', url)
+
+    def _on_recording_started(self, output_path):
+        self.recording_notice.emit(f'Tile {self.index + 1} recording: {output_path}')
+
+    def _on_recording_stopped(self, output_path):
+        self.recording_notice.emit(f'Tile {self.index + 1} saved: {output_path}')
+
+    def _on_recording_error(self, message):
+        self.recording_notice.emit(f'Tile {self.index + 1} recording error: {message}')
+
+    def _update_record_ui(self, _recording=None):
+        recording = self.recorder.is_recording()
+        self.record_btn.setText('Stop REC' if recording else 'Start REC')
+        self.record_btn.setEnabled(bool(self.streams) or recording)
+        self.stream_combo.setEnabled(bool(self.streams) and not recording)
+        palette = self.palette()
+        self.apply_theme(
+            palette.color(QPalette.ColorRole.Base),
+            palette.color(QPalette.ColorRole.Window),
+            palette.color(QPalette.ColorRole.Text),
+            palette.color(QPalette.ColorRole.Mid),
+            palette.color(QPalette.ColorRole.Highlight),
+        )
+
 
 class MainWindow(QMainWindow):
     COMMENT_ACCENTS = (
@@ -425,6 +518,7 @@ class MainWindow(QMainWindow):
         self._single_live_id = 0
         self._logged_in = False
         self._current_user_name = ''
+        self._current_user_info = {}
         self._comment_room_id = 0
         self._comment_live_id = 0
         self._comment_entries = []
@@ -440,6 +534,7 @@ class MainWindow(QMainWindow):
         self._setup_player()
         self._setup_multi_mode()
         self._set_mode('single')
+        self._restore_cached_login()
         self._refresh_rooms()
 
     # ── UI ──────────────────────────────────────────────────────────────────
@@ -465,19 +560,25 @@ class MainWindow(QMainWindow):
         self.mode_btn.clicked.connect(self._toggle_mode)
 
         self.login_btn = QPushButton('Sign In')
-        self.login_btn.setFixedWidth(70)
+        self.login_btn.setFixedWidth(84)
         self.login_btn.clicked.connect(self._open_login)
 
         self.logout_btn = QPushButton('Sign Out')
-        self.logout_btn.setFixedWidth(70)
+        self.logout_btn.setFixedWidth(84)
         self.logout_btn.setEnabled(False)
         self.logout_btn.clicked.connect(self._logout)
+
+        self.user_info_btn = QPushButton('My Info')
+        self.user_info_btn.setFixedWidth(84)
+        self.user_info_btn.setEnabled(False)
+        self.user_info_btn.clicked.connect(self._open_user_info)
 
         top.addWidget(self.url_input)
         top.addWidget(self.load_btn)
         top.addWidget(self.mode_btn)
         top.addWidget(self.login_btn)
         top.addWidget(self.logout_btn)
+        top.addWidget(self.user_info_btn)
         root.addLayout(top)
 
         self.outer_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -524,6 +625,8 @@ class MainWindow(QMainWindow):
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
+        for tile in self._multi_tiles:
+            tile.recording_notice.connect(self.status_bar.showMessage)
 
         self._apply_ui_theme()
         self._update_identity_label()
@@ -534,6 +637,23 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
+
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(4, 0, 4, 0)
+        header_layout.setSpacing(8)
+        self.single_room_label = QLabel('No room loaded')
+        self.single_room_label.setFont(QFont('Menlo', 10))
+        self.single_record_indicator = QLabel()
+        self.single_record_indicator.setFixedSize(10, 10)
+        self.single_record_btn = QPushButton('Start REC')
+        self.single_record_btn.setFixedWidth(96)
+        self.single_record_btn.setEnabled(False)
+        self.single_record_btn.clicked.connect(self._toggle_single_recording)
+        header_layout.addWidget(self.single_room_label, stretch=1)
+        header_layout.addWidget(self.single_record_indicator)
+        header_layout.addWidget(self.single_record_btn)
+        layout.addWidget(header)
 
         self.video_widget = QVideoWidget()
         self.video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -670,6 +790,11 @@ class MainWindow(QMainWindow):
         self.player.setVideoOutput(self.video_widget)
         self.player.playbackStateChanged.connect(self._on_playback_state_changed)
         self.player.errorOccurred.connect(self._on_player_error)
+        self._single_recorder = StreamRecorder(self)
+        self._single_recorder.state_changed.connect(self._update_single_record_ui)
+        self._single_recorder.started.connect(self._on_single_recording_started)
+        self._single_recorder.stopped.connect(self._on_single_recording_stopped)
+        self._single_recorder.error.connect(self._on_single_recording_error)
 
     def _setup_multi_mode(self):
         self._apply_multi_layout(self.multi_layout_combo.currentText())
@@ -715,6 +840,85 @@ class MainWindow(QMainWindow):
     def _on_volume_changed(self, value):
         self.audio_output.setVolume(value / 100)
 
+    def _toggle_single_recording(self):
+        if self._single_recorder.is_recording():
+            self._stop_single_recording()
+            return
+        idx = self.stream_combo.currentIndex()
+        if idx < 0 or idx >= len(self._streams):
+            self.status_bar.showMessage('No stream available to record.')
+            return
+        _label, url = self._streams[idx]
+        self._single_recorder.start_recording(self._single_room_name or 'showroom-room', url)
+
+    def _stop_single_recording(self, silent=False):
+        self._single_recorder.stop_recording(silent=silent)
+
+    def _on_single_recording_started(self, output_path):
+        self.status_bar.showMessage(f'Recording: {output_path}')
+
+    def _on_single_recording_stopped(self, output_path):
+        self.status_bar.showMessage(f'Recording saved: {output_path}')
+
+    def _on_single_recording_error(self, message):
+        self.status_bar.showMessage(f'Recording error: {message}')
+
+    def _update_single_record_ui(self, _recording=None):
+        recorder = getattr(self, '_single_recorder', None)
+        recording = recorder.is_recording() if recorder is not None else False
+        self.single_record_btn.setText('Stop REC' if recording else 'Start REC')
+        self.single_record_btn.setEnabled(bool(self._streams) or recording)
+        self.stream_combo.setEnabled(bool(self._streams) and not recording)
+        palette = self.palette()
+        border = palette.color(QPalette.ColorRole.Mid)
+        window = palette.color(QPalette.ColorRole.Window)
+        highlight = palette.color(QPalette.ColorRole.Highlight)
+        button_bg = '#b63a30' if recording else self._color_to_css(
+            self._mix_colors(
+                self._mix_colors(
+                    palette.color(QPalette.ColorRole.Base),
+                    window,
+                    0.16,
+                ),
+                highlight,
+                0.04,
+            )
+        )
+        button_hover = '#cf473c' if recording else self._color_to_css(
+            self._mix_colors(
+                self._mix_colors(
+                    palette.color(QPalette.ColorRole.Base),
+                    window,
+                    0.16,
+                ),
+                highlight,
+                0.10,
+            )
+        )
+        button_text = 'white' if recording else self._color_to_css(palette.color(QPalette.ColorRole.Text))
+        border_color = self._color_to_css(self._mix_colors(border, highlight, 0.52)) if recording else self._color_to_rgba(border, 55)
+        self.single_record_btn.setStyleSheet(
+            'QPushButton {'
+            f' background: {button_bg};'
+            f' color: {button_text};'
+            f' border: 1px solid {border_color};'
+            ' border-radius: 12px;'
+            ' padding: 8px 12px;'
+            '}'
+            'QPushButton:hover {'
+            f' background: {button_hover};'
+            '}'
+            'QPushButton:disabled {'
+            f' color: {self._color_to_rgba(palette.color(QPalette.ColorRole.Text), 110)};'
+            f' background: {self._color_to_rgba(self._mix_colors(palette.color(QPalette.ColorRole.Base), window, 0.16), 180)};'
+            '}'
+        )
+        self.single_record_indicator.setStyleSheet(
+            f'background: {"#e74c3c" if recording else self._color_to_css(self._mix_colors(border, window, 0.34))};'
+            f'border: 1px solid {self._color_to_css(self._mix_colors(border, highlight, 0.52)) if recording else self._color_to_rgba(border, 55)};'
+            'border-radius: 5px;'
+        )
+
     # ── Single Stream ───────────────────────────────────────────────────────
 
     def _on_stream_changed(self, idx):
@@ -735,12 +939,14 @@ class MainWindow(QMainWindow):
             self._load_single_room(room_input)
 
     def _load_single_room(self, room_input):
+        self._stop_single_recording(silent=True)
         self._stop_player()
         self.stream_combo.clear()
         self._streams = []
         self._single_room_name = ''
         self._single_room_id = 0
         self._single_live_id = 0
+        self.single_room_label.setText('Loading room...')
         self.play_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
         self.load_btn.setEnabled(False)
@@ -758,6 +964,7 @@ class MainWindow(QMainWindow):
         self._single_room_name = room_name
         self._single_room_id = room_id
         self._single_live_id = live_id
+        self.single_room_label.setText(room_name)
 
         self.stream_combo.blockSignals(True)
         self.stream_combo.clear()
@@ -772,10 +979,13 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(f'Showroom Player - {room_name}')
         self.status_bar.showMessage(f'{room_name}  ·  {len(streams)} quality options')
+        self._update_single_record_ui()
         if self._mode == 'single':
             self._set_comment_room(room_id, live_id, room_name, mode='single')
 
     def _on_room_load_error(self, msg):
+        self.single_room_label.setText('No room loaded')
+        self._update_single_record_ui()
         self.status_bar.showMessage(f'Error: {msg}')
 
     # ── Multi Mode ──────────────────────────────────────────────────────────
@@ -784,12 +994,14 @@ class MainWindow(QMainWindow):
         self._mode = mode
         is_multi = mode == 'multi'
         if is_multi:
+            self._stop_single_recording(silent=True)
             self._stop_player()
             self._update_multi_tile_sizes()
             for tile in self._visible_multi_tiles():
                 tile.resume_loaded()
         else:
             for tile in self._multi_tiles:
+                tile.stop_recording(silent=True)
                 tile.stop()
         self.center_stack.setCurrentWidget(self.multi_page if is_multi else self.single_page)
         self.mode_btn.setText('Single View' if is_multi else 'Multi View')
@@ -958,32 +1170,100 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._logged_in = True
             self.login_btn.setEnabled(False)
+            self.login_btn.setText('Account')
             self.logout_btn.setEnabled(True)
             self._current_user_name = ''
             self._update_identity_label(loading=True)
             self._update_comment_input_state()
             self.status_bar.showMessage('Signed in. Loading profile...')
-            self._username_thread = LoadUsernameThread()
-            self._username_thread.done.connect(self._on_username_fetched)
-            self._username_thread.start()
+            self._current_user_thread = LoadCurrentUserThread()
+            self._current_user_thread.done.connect(self._on_login_user_fetched)
+            self._current_user_thread.start()
 
-    def _on_username_fetched(self, name):
-        self._current_user_name = name
-        self.login_btn.setText(name)
+    @staticmethod
+    def _display_name_from_user_info(user_info):
+        return (
+            user_info.get('account_id')
+            or user_info.get('user_name')
+            or user_info.get('name')
+            or ''
+        )
+
+    def _on_login_user_fetched(self, user_info, ok):
+        if ok:
+            self._current_user_info = dict(user_info)
+            self._current_user_name = self._display_name_from_user_info(user_info)
+            self.login_btn.setText(self._current_user_name or 'Account')
+            save_session_cookies()
+            self.status_bar.showMessage(f'Signed in as {self._current_user_name or "Account"}')
+        else:
+            self._current_user_info = {}
+            self._current_user_name = ''
+            self.login_btn.setText('Account')
+            self.status_bar.showMessage('Signed in.')
+        self.user_info_btn.setEnabled(self._logged_in)
         self._update_identity_label()
         self._update_comment_input_state()
-        self.status_bar.showMessage(f'Signed in as {name}')
+
+    def _on_restore_user_fetched(self, user_info, ok):
+        if ok:
+            self._logged_in = True
+            self._current_user_info = dict(user_info)
+            self._current_user_name = self._display_name_from_user_info(user_info)
+            self.login_btn.setText(self._current_user_name or 'Account')
+            self.login_btn.setEnabled(False)
+            self.logout_btn.setEnabled(True)
+            self.user_info_btn.setEnabled(True)
+            save_session_cookies()
+            self.status_bar.showMessage(f'Signed in as {self._current_user_name or "Account"}')
+        else:
+            self._logged_in = False
+            self._current_user_name = ''
+            self._current_user_info = {}
+            self.login_btn.setText('Sign In')
+            self.login_btn.setEnabled(True)
+            self.logout_btn.setEnabled(False)
+            self.user_info_btn.setEnabled(False)
+            clear_session_cookies()
+            self.status_bar.showMessage('Saved session expired. Please sign in again.')
+        self._update_identity_label()
+        self._update_comment_input_state()
 
     def _logout(self):
-        session.cookies.clear()
+        clear_session_cookies()
         self._logged_in = False
         self._current_user_name = ''
+        self._current_user_info = {}
         self.login_btn.setText('Sign In')
         self.login_btn.setEnabled(True)
         self.logout_btn.setEnabled(False)
+        self.user_info_btn.setEnabled(False)
         self._update_identity_label()
         self._update_comment_input_state()
         self.status_bar.showMessage('Signed out.')
+
+    def _restore_cached_login(self):
+        if not load_session_cookies():
+            return
+        self._logged_in = False
+        self.login_btn.setEnabled(False)
+        self.logout_btn.setEnabled(False)
+        self.user_info_btn.setEnabled(False)
+        self._update_identity_label(loading=True)
+        self.status_bar.showMessage('Restoring saved sign-in...')
+        self._current_user_thread = LoadCurrentUserThread()
+        self._current_user_thread.done.connect(self._on_restore_user_fetched)
+        self._current_user_thread.start()
+
+    def _open_user_info(self):
+        if not self._logged_in:
+            self.status_bar.showMessage('Sign in to view account details.')
+            return
+        if not self._current_user_info:
+            self.status_bar.showMessage('Account details are still loading. Please try again.')
+            return
+        dlg = UserInfoDialog(self._current_user_info, self)
+        dlg.exec()
 
     # ── Comments ─────────────────────────────────────────────────────────────
 
@@ -1182,10 +1462,12 @@ class MainWindow(QMainWindow):
             self.mode_btn,
             self.login_btn,
             self.logout_btn,
+            self.user_info_btn,
             self.refresh_btn,
             self.play_btn,
             self.stop_btn,
             self.mute_btn,
+            self.single_record_btn,
             self.send_btn,
         ):
             button.setStyleSheet(button_style)
@@ -1215,6 +1497,7 @@ class MainWindow(QMainWindow):
         self.identity_label.setStyleSheet(f'color: {label_color};')
         self.comment_target_label.setStyleSheet(f'color: {label_color};')
         self.multi_hint_label.setStyleSheet(f'color: {label_color};')
+        self.single_room_label.setStyleSheet(f'color: {self._color_to_css(text)};')
 
         self.rooms_list.setStyleSheet(
             'QListWidget {'
@@ -1243,6 +1526,7 @@ class MainWindow(QMainWindow):
             f'border: 1px solid {soft_border};'
             'border-radius: 16px;'
         )
+        self._update_single_record_ui()
         for tile in self._multi_tiles:
             tile.apply_theme(base, window, text, border, highlight)
 
@@ -1450,9 +1734,26 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    @staticmethod
+    def _wait_for_thread(thread):
+        if thread is None:
+            return
+        if thread.isRunning():
+            thread.wait()
+
     def closeEvent(self, event):
         self._stop_comments()
+        self._stop_single_recording(silent=True)
+        self._single_recorder.wait_for_stop()
+        self._wait_for_thread(getattr(self, '_load_room_thread', None))
+        self._wait_for_thread(getattr(self, '_live_rooms_thread', None))
+        self._wait_for_thread(getattr(self, '_current_user_thread', None))
+        self._wait_for_thread(getattr(self, '_post_thread', None))
+        for thread in list(self._multi_load_threads.values()):
+            self._wait_for_thread(thread)
         self.player.stop()
         for tile in self._multi_tiles:
+            tile.stop_recording(silent=True)
+            tile.wait_for_recording_stop()
             tile.stop()
         event.accept()

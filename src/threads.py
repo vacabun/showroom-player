@@ -2,6 +2,7 @@ import time
 from PySide6.QtCore import QThread, Signal
 
 from .api import (
+    fetch_followed_rooms,
     fetch_current_user,
     get_all_streams,
     get_raw_stream_list,
@@ -85,8 +86,16 @@ class LiveRoomsThread(QThread):
     rooms_ready = Signal(list)
     error = Signal(str)
 
+    def __init__(self, followed_only=False):
+        super().__init__()
+        self.followed_only = followed_only
+
     def run(self):
         try:
+            if self.followed_only:
+                self.rooms_ready.emit(fetch_followed_rooms())
+                return
+
             url = 'https://www.showroom-live.com/api/live/onlives'
             response = session.get(url, timeout=10)
             data = response.json()
@@ -100,8 +109,14 @@ class LiveRoomsThread(QThread):
                     seen.add(key)
                     name = live.get('main_name', key)
                     viewers = live.get('view_num', 0)
-                    rooms.append((key, name, viewers))
-            rooms.sort(key=lambda x: x[2], reverse=True)
+                    rooms.append({
+                        'key': key,
+                        'name': name,
+                        'viewers': viewers,
+                        'is_online': True,
+                        'next_live': '',
+                    })
+            rooms.sort(key=lambda item: item.get('viewers', 0), reverse=True)
             self.rooms_ready.emit(rooms)
         except Exception as e:
             self.error.emit(str(e))

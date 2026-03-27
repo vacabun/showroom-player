@@ -1,7 +1,7 @@
 from html import escape
 
 from PySide6.QtCore import QEvent, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QFont, QPalette
+from PySide6.QtGui import QBrush, QColor, QFont, QPalette
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -517,6 +517,7 @@ class MainWindow(QMainWindow):
         self._single_room_id = 0
         self._single_live_id = 0
         self._logged_in = False
+        self._rooms_source = 'all'
         self._current_user_name = ''
         self._current_user_info = {}
         self._comment_room_id = 0
@@ -560,13 +561,8 @@ class MainWindow(QMainWindow):
         self.mode_btn.clicked.connect(self._toggle_mode)
 
         self.login_btn = QPushButton('Sign In')
-        self.login_btn.setFixedWidth(84)
-        self.login_btn.clicked.connect(self._open_login)
-
-        self.logout_btn = QPushButton('Sign Out')
-        self.logout_btn.setFixedWidth(84)
-        self.logout_btn.setEnabled(False)
-        self.logout_btn.clicked.connect(self._logout)
+        self.login_btn.setFixedWidth(88)
+        self.login_btn.clicked.connect(self._on_auth_button_clicked)
 
         self.user_info_btn = QPushButton('My Info')
         self.user_info_btn.setFixedWidth(84)
@@ -577,7 +573,6 @@ class MainWindow(QMainWindow):
         top.addWidget(self.load_btn)
         top.addWidget(self.mode_btn)
         top.addWidget(self.login_btn)
-        top.addWidget(self.logout_btn)
         top.addWidget(self.user_info_btn)
         root.addLayout(top)
 
@@ -594,6 +589,19 @@ class MainWindow(QMainWindow):
         self.refresh_btn = QPushButton('Reload')
         self.refresh_btn.clicked.connect(self._refresh_rooms)
         rooms_layout.addWidget(self.refresh_btn)
+
+        source_row = QHBoxLayout()
+        source_row.setContentsMargins(0, 0, 0, 0)
+        source_row.setSpacing(6)
+        self.rooms_all_btn = QPushButton('All')
+        self.rooms_all_btn.setCheckable(True)
+        self.rooms_all_btn.clicked.connect(lambda: self._set_rooms_source('all'))
+        self.rooms_followed_btn = QPushButton('Followed')
+        self.rooms_followed_btn.setCheckable(True)
+        self.rooms_followed_btn.clicked.connect(lambda: self._set_rooms_source('followed'))
+        source_row.addWidget(self.rooms_all_btn)
+        source_row.addWidget(self.rooms_followed_btn)
+        rooms_layout.addLayout(source_row)
 
         self.rooms_list = QListWidget()
         self.rooms_list.itemDoubleClicked.connect(self._on_room_double_clicked)
@@ -629,6 +637,8 @@ class MainWindow(QMainWindow):
             tile.recording_notice.connect(self.status_bar.showMessage)
 
         self._apply_ui_theme()
+        self._update_auth_button()
+        self._update_room_source_buttons()
         self._update_identity_label()
         self._update_comment_input_state()
 
@@ -763,6 +773,9 @@ class MainWindow(QMainWindow):
         meta_row.setSpacing(8)
         self.identity_label = QLabel()
         self.identity_label.setFont(QFont('Menlo', 10))
+        self.identity_label.setWordWrap(True)
+        self.identity_label.setMinimumHeight(28)
+        self.identity_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         meta_row.addWidget(self.identity_label)
         meta_row.addStretch()
         self.send_btn = QPushButton('Send')
@@ -774,7 +787,7 @@ class MainWindow(QMainWindow):
         self.comment_input = QTextEdit()
         self.comment_input.setAcceptRichText(False)
         self.comment_input.setFont(QFont('Menlo', 10))
-        self.comment_input.setFixedHeight(72)
+        self.comment_input.setFixedHeight(92)
         self.comment_input.installEventFilter(self)
         layout.addWidget(self.comment_input)
 
@@ -1165,17 +1178,33 @@ class MainWindow(QMainWindow):
 
     # ── Login ────────────────────────────────────────────────────────────────
 
+    def _on_auth_button_clicked(self):
+        if self._logged_in:
+            self._logout()
+            return
+        self._open_login()
+
+    def _update_auth_button(self, loading=False):
+        if loading:
+            self.login_btn.setText('Loading...')
+            self.login_btn.setEnabled(False)
+            return
+        self.login_btn.setText('Sign Out' if self._logged_in else 'Sign In')
+        self.login_btn.setEnabled(True)
+
     def _open_login(self):
         dlg = LoginDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._logged_in = True
-            self.login_btn.setEnabled(False)
-            self.login_btn.setText('Account')
-            self.logout_btn.setEnabled(True)
+            self._rooms_source = 'followed'
             self._current_user_name = ''
+            self._current_user_info = {}
+            self._update_auth_button(loading=True)
+            self._update_room_source_buttons()
             self._update_identity_label(loading=True)
             self._update_comment_input_state()
             self.status_bar.showMessage('Signed in. Loading profile...')
+            self._refresh_rooms()
             self._current_user_thread = LoadCurrentUserThread()
             self._current_user_thread.done.connect(self._on_login_user_fetched)
             self._current_user_thread.start()
@@ -1183,8 +1212,8 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _display_name_from_user_info(user_info):
         return (
-            user_info.get('account_id')
-            or user_info.get('user_name')
+            user_info.get('user_name')
+            or user_info.get('account_id')
             or user_info.get('name')
             or ''
         )
@@ -1193,14 +1222,13 @@ class MainWindow(QMainWindow):
         if ok:
             self._current_user_info = dict(user_info)
             self._current_user_name = self._display_name_from_user_info(user_info)
-            self.login_btn.setText(self._current_user_name or 'Account')
             save_session_cookies()
             self.status_bar.showMessage(f'Signed in as {self._current_user_name or "Account"}')
         else:
             self._current_user_info = {}
             self._current_user_name = ''
-            self.login_btn.setText('Account')
             self.status_bar.showMessage('Signed in.')
+        self._update_auth_button()
         self.user_info_btn.setEnabled(self._logged_in)
         self._update_identity_label()
         self._update_comment_input_state()
@@ -1208,46 +1236,47 @@ class MainWindow(QMainWindow):
     def _on_restore_user_fetched(self, user_info, ok):
         if ok:
             self._logged_in = True
+            self._rooms_source = 'followed'
             self._current_user_info = dict(user_info)
             self._current_user_name = self._display_name_from_user_info(user_info)
-            self.login_btn.setText(self._current_user_name or 'Account')
-            self.login_btn.setEnabled(False)
-            self.logout_btn.setEnabled(True)
             self.user_info_btn.setEnabled(True)
             save_session_cookies()
             self.status_bar.showMessage(f'Signed in as {self._current_user_name or "Account"}')
+            self._refresh_rooms()
         else:
             self._logged_in = False
+            self._rooms_source = 'all'
             self._current_user_name = ''
             self._current_user_info = {}
-            self.login_btn.setText('Sign In')
-            self.login_btn.setEnabled(True)
-            self.logout_btn.setEnabled(False)
             self.user_info_btn.setEnabled(False)
             clear_session_cookies()
             self.status_bar.showMessage('Saved session expired. Please sign in again.')
+            self._refresh_rooms()
+        self._update_auth_button()
+        self._update_room_source_buttons()
         self._update_identity_label()
         self._update_comment_input_state()
 
     def _logout(self):
         clear_session_cookies()
         self._logged_in = False
+        self._rooms_source = 'all'
         self._current_user_name = ''
         self._current_user_info = {}
-        self.login_btn.setText('Sign In')
-        self.login_btn.setEnabled(True)
-        self.logout_btn.setEnabled(False)
+        self._update_auth_button()
+        self._update_room_source_buttons()
         self.user_info_btn.setEnabled(False)
         self._update_identity_label()
         self._update_comment_input_state()
         self.status_bar.showMessage('Signed out.')
+        self._refresh_rooms()
 
     def _restore_cached_login(self):
         if not load_session_cookies():
             return
         self._logged_in = False
-        self.login_btn.setEnabled(False)
-        self.logout_btn.setEnabled(False)
+        self._update_auth_button(loading=True)
+        self._update_room_source_buttons()
         self.user_info_btn.setEnabled(False)
         self._update_identity_label(loading=True)
         self.status_bar.showMessage('Restoring saved sign-in...')
@@ -1452,6 +1481,10 @@ class MainWindow(QMainWindow):
             'QPushButton:pressed {'
             f' background: {self._color_to_css(self._mix_colors(button_hover, highlight, 0.14))};'
             '}'
+            'QPushButton:checked {'
+            f' background: {self._color_to_css(self._mix_colors(button_hover, highlight, 0.22))};'
+            f' border: 1px solid {self._color_to_css(self._mix_colors(border, highlight, 0.56))};'
+            '}'
             'QPushButton:disabled {'
             f' color: {self._color_to_rgba(text, 110)};'
             f' background: {self._color_to_rgba(surface_bg, 180)};'
@@ -1461,9 +1494,10 @@ class MainWindow(QMainWindow):
             self.load_btn,
             self.mode_btn,
             self.login_btn,
-            self.logout_btn,
             self.user_info_btn,
             self.refresh_btn,
+            self.rooms_all_btn,
+            self.rooms_followed_btn,
             self.play_btn,
             self.stop_btn,
             self.mute_btn,
@@ -1659,12 +1693,18 @@ class MainWindow(QMainWindow):
 
     def _update_identity_label(self, loading=False):
         if loading:
-            self.identity_label.setText('My ID: loading...')
+            self.identity_label.setText('User: loading...')
             return
         if self._logged_in:
-            self.identity_label.setText(f'My ID: {self._current_user_name or "..."}')
+            display_name = (
+                self._current_user_info.get('user_name')
+                or self._current_user_info.get('name')
+                or self._current_user_name
+                or '...'
+            )
+            self.identity_label.setText(f'User: {display_name}')
             return
-        self.identity_label.setText('My ID: not signed in')
+        self.identity_label.setText('User: not signed in')
 
     def _update_comment_input_state(self):
         can_post = self._logged_in and bool(self._comment_live_id)
@@ -1679,23 +1719,109 @@ class MainWindow(QMainWindow):
 
     # ── Rooms ────────────────────────────────────────────────────────────────
 
+    def _effective_rooms_source(self):
+        if self._rooms_source == 'followed' and self._logged_in:
+            return 'followed'
+        return 'all'
+
+    def _update_room_source_buttons(self):
+        followed_available = self._logged_in
+        effective_source = self._effective_rooms_source()
+        self.rooms_all_btn.setChecked(effective_source == 'all')
+        self.rooms_followed_btn.setChecked(effective_source == 'followed')
+        self.rooms_followed_btn.setEnabled(followed_available)
+
+    def _set_rooms_source(self, source):
+        normalized = 'followed' if source == 'followed' else 'all'
+        if normalized == 'followed' and not self._logged_in:
+            normalized = 'all'
+        if self._rooms_source == normalized:
+            self._update_room_source_buttons()
+            return
+        self._rooms_source = normalized
+        self._update_room_source_buttons()
+        self._refresh_rooms()
+
+    def _rooms_box_title(self, source):
+        return 'Followed Rooms' if source == 'followed' else 'Live Rooms'
+
+    def _room_list_subtitle(self, room, source):
+        if source != 'followed':
+            return f'{room.get("viewers", 0):,} watching'
+        if room.get('is_online'):
+            return 'LIVE now'
+        next_live = (room.get('next_live') or '').strip()
+        if next_live and next_live != '未定':
+            return f'Next: {next_live}'
+        return 'Offline'
+
     def _refresh_rooms(self):
+        source = self._effective_rooms_source()
+        followed_only = source == 'followed'
+        self._update_room_source_buttons()
         self.refresh_btn.setEnabled(False)
         self.rooms_list.clear()
-        self.status_bar.showMessage('Loading live rooms...')
-        self._live_rooms_thread = LiveRoomsThread()
-        self._live_rooms_thread.rooms_ready.connect(self._on_rooms_ready)
-        self._live_rooms_thread.error.connect(lambda e: self.status_bar.showMessage(f'Rooms error: {e}'))
-        self._live_rooms_thread.finished.connect(lambda: self.refresh_btn.setEnabled(True))
-        self._live_rooms_thread.start()
+        self.rooms_box.setTitle(self._rooms_box_title(source))
+        self.status_bar.showMessage(
+            'Loading followed rooms...' if followed_only else 'Loading live rooms...'
+        )
+        thread = LiveRoomsThread(followed_only=followed_only)
+        self._live_rooms_thread = thread
+        thread.rooms_ready.connect(
+            lambda rooms, source_thread=thread, source_name=source:
+            self._on_rooms_ready(source_thread, rooms, source_name)
+        )
+        thread.error.connect(
+            lambda error_text, source_thread=thread:
+            self._on_rooms_error(source_thread, error_text)
+        )
+        thread.finished.connect(
+            lambda source_thread=thread: self._on_rooms_thread_finished(source_thread)
+        )
+        thread.start()
 
-    def _on_rooms_ready(self, rooms):
+    def _on_rooms_ready(self, source_thread, rooms, source):
+        if source_thread is not self._live_rooms_thread:
+            return
         self.rooms_list.clear()
-        for key, name, viewers in rooms:
-            item = QListWidgetItem(f'{name}\n{viewers:,} watching')
-            item.setData(Qt.ItemDataRole.UserRole, key)
+        self.rooms_box.setTitle(self._rooms_box_title(source))
+        palette = self.palette()
+        live_bg = self._mix_colors(
+            palette.color(QPalette.ColorRole.Base),
+            palette.color(QPalette.ColorRole.Highlight),
+            0.20,
+        )
+        live_fg = self._mix_colors(
+            palette.color(QPalette.ColorRole.Text),
+            palette.color(QPalette.ColorRole.Highlight),
+            0.18,
+        )
+        for room in rooms:
+            item = QListWidgetItem(
+                f'{room.get("name", room.get("key", ""))}\n'
+                f'{self._room_list_subtitle(room, source)}'
+            )
+            item.setData(Qt.ItemDataRole.UserRole, room.get('key', ''))
+            if source == 'followed' and room.get('is_online'):
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                item.setBackground(QBrush(live_bg))
+                item.setForeground(QBrush(live_fg))
+                item.setToolTip('Currently live')
             self.rooms_list.addItem(item)
-        self.status_bar.showMessage(f'{len(rooms)} live rooms')
+        summary = 'followed rooms' if source == 'followed' else 'live rooms'
+        self.status_bar.showMessage(f'{len(rooms)} {summary}')
+
+    def _on_rooms_error(self, source_thread, message):
+        if source_thread is not self._live_rooms_thread:
+            return
+        self.status_bar.showMessage(f'Rooms error: {message}')
+
+    def _on_rooms_thread_finished(self, source_thread):
+        if source_thread is not self._live_rooms_thread:
+            return
+        self.refresh_btn.setEnabled(True)
 
     def _on_room_double_clicked(self, item):
         key = item.data(Qt.ItemDataRole.UserRole)

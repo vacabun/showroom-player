@@ -90,6 +90,42 @@ def fetch_current_user_name():
     )
 
 
+def fetch_followed_rooms():
+    rooms = []
+    seen = set()
+    next_page = 1
+
+    while next_page:
+        resp = session.get(
+            'https://www.showroom-live.com/api/follow/rooms',
+            params={'page': next_page},
+            timeout=10,
+        )
+        data = resp.json()
+        page_rooms = data.get('rooms', [])
+        if not isinstance(page_rooms, list):
+            break
+
+        for room in page_rooms:
+            key = room.get('room_url_key', '')
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            rooms.append({
+                'key': key,
+                'name': room.get('room_name') or key,
+                'is_online': bool(room.get('is_online')),
+                'next_live': room.get('next_live') or '',
+            })
+
+        next_page = data.get('next_page')
+        if not next_page:
+            break
+
+    rooms.sort(key=lambda room: not room.get('is_online', False))
+    return rooms
+
+
 def set_session_cookie(name, value, domain='', path='/', secure=False, expires=None):
     cookie_kwargs = {
         'path': path or '/',
@@ -138,27 +174,46 @@ def get_raw_stream_list(room_id):
 
 def expand_hls_all(m3u8_url):
     try:
-        playlist = m3u8.load(m3u8_url)
+        response = session.get(m3u8_url, timeout=10)
+        response.raise_for_status()
+        playlist = m3u8.loads(response.text, uri=m3u8_url)
         if not playlist.playlists:
             return [(0, 'hls_all  |  Default', m3u8_url)]
         results = []
         for p in playlist.playlists:
-            bw = p.stream_info.bandwidth
-            url = p.uri
-            if not url.startswith('http'):
+            stream_info = getattr(p, 'stream_info', None)
+            bw = 0
+            if stream_info is not None:
+                bw = (
+                    getattr(stream_info, 'bandwidth', None)
+                    or getattr(stream_info, 'average_bandwidth', None)
+                    or 0
+                )
+
+            url = getattr(p, 'absolute_uri', None) or p.uri
+            if url and not url.startswith('http'):
                 if url.startswith('/'):
                     parsed = urlparse(m3u8_url)
                     url = f'{parsed.scheme}://{parsed.netloc}{url}'
                 else:
                     url = m3u8_url.rsplit('/', 1)[0] + '/' + url
-            parts = ['hls_all', f'{bw // 1000} kbps']
-            res = p.stream_info.resolution
+            if not url:
+                continue
+
+            parts = ['hls_all']
+            if bw:
+                parts.append(f'{bw // 1000} kbps')
+            res = getattr(stream_info, 'resolution', None)
             if res:
                 parts.append(f'{res[0]}x{res[1]}')
-            fps = p.stream_info.frame_rate
+            fps = getattr(stream_info, 'frame_rate', None)
             if fps:
                 parts.append(f'{fps:.0f}fps')
+            if len(parts) == 1:
+                parts.append('Variant')
             results.append((bw, '  |  '.join(parts), url))
+        if not results:
+            return [(0, 'hls_all  |  Default', m3u8_url)]
         results.sort(key=lambda x: x[0], reverse=True)
         return results
     except Exception:

@@ -16,7 +16,7 @@ jobs:
             release_path: dist/showroom-player_windows_amd64.zip
             asset_name: showroom-player_windows_amd64.zip
           - os: macos-latest
-            build_cmd: pyinstaller --windowed --name showroom-player main.py
+            build_cmd: pyinstaller --windowed --name showroom-player --icon assets/app-icon.icns main.py
             release_path: dist/showroom-player_macos_arm64.app.zip
             asset_name: showroom-player_macos_arm64.app.zip
     runs-on: ${{ matrix.os }}

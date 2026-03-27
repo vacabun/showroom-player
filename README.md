@@ -39,7 +39,7 @@ Do not use `--onefile` on macOS. Building an `.app` bundle starts faster and can
 ```bash
 source .venv/bin/activate
 pip install pyinstaller
-pyinstaller --windowed --name showroom-player main.py
+pyinstaller --windowed --name showroom-player --icon assets/app-icon.icns main.py
 ditto -c -k --sequesterRsrc --keepParent dist/showroom-player.app dist/showroom-player_macos_arm64.app.zip
 ```
 

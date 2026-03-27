@@ -211,13 +211,24 @@ def expand_hls_all(m3u8_url):
                 parts.append(f'{fps:.0f}fps')
             if len(parts) == 1:
                 parts.append('Variant')
-            results.append((bw, '  |  '.join(parts), url))
+            results.append((bw, compact_stream_label(parts), url))
         if not results:
             return [(0, 'hls_all  |  Default', m3u8_url)]
         results.sort(key=lambda x: x[0], reverse=True)
         return results
     except Exception:
         return [(0, 'hls_all  |  Default', m3u8_url)]
+
+
+def compact_stream_label(parts):
+    parts = [str(part).strip() for part in parts if str(part).strip()]
+    if not parts:
+        return ''
+    if len(parts) >= 3:
+        return '  |  '.join((parts[0], parts[2]))
+    if len(parts) == 2:
+        return '  |  '.join((parts[0], parts[1]))
+    return parts[0]
 
 
 def get_all_streams(url_list):
@@ -237,7 +248,7 @@ def get_all_streams(url_list):
                 parts.append(str(quality))
             if label_part:
                 parts.append(str(label_part))
-            streams.append((-1, '  |  '.join(parts), url))
+            streams.append((-1, compact_stream_label(parts), url))
         # webrtc and other non-HLS types are skipped
 
     streams.sort(key=lambda x: x[0], reverse=True)

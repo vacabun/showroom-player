@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import clear_session_cookies, load_session_cookies, save_session_cookies
+from .branding import app_icon
 from .dialogs import LoginDialog, UserInfoDialog
 from .recording import StreamRecorder
 from .threads import (
@@ -508,6 +509,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Showroom Player')
+        self.setWindowIcon(app_icon())
         self.setMinimumSize(1040, 700)
         self.resize(1720, 980)
 
@@ -1642,21 +1644,21 @@ class MainWindow(QMainWindow):
         html = f'''
         <table width="100%" cellspacing="0" cellpadding="0" style="margin:0;">
           <tr>
-            <td style="padding:0 0 4px 0;">
-              <span style="font-size:13px; font-weight:700; color:{style["name"]};">{safe_name}</span>
-              <span style="font-size:11px; color:{style["meta"]};">  /  {safe_identity}</span>
+            <td style="padding:0 0 2px 0;">
+              <span style="font-size:12px; font-weight:700; color:{style["name"]};">{safe_name}</span>
+              <span style="font-size:10px; color:{style["meta"]};">  /  {safe_identity}</span>
             </td>
           </tr>
           <tr>
             <td style="
-              padding:0 0 8px 0;
+              padding:0 0 4px 0;
               color:{style["text"]};
-              font-size:13px;
-              line-height:1.45;
+              font-size:12px;
+              line-height:1.3;
             ">{safe_text}</td>
           </tr>
           <tr>
-            <td style="padding:0 0 8px 0;">
+            <td style="padding:0 0 4px 0;">
               <div style="border-top:1px dashed {style["divider"]}; height:1px;"></div>
             </td>
           </tr>
@@ -1678,12 +1680,12 @@ class MainWindow(QMainWindow):
           <tr>
             <td style="
               color:{self._color_to_css(meta)};
-              padding:2px 0 8px 0;
-              font-size:12px;
+              padding:1px 0 4px 0;
+              font-size:11px;
             ">{safe_text}</td>
           </tr>
           <tr>
-            <td style="padding:0 0 8px 0;">
+            <td style="padding:0 0 4px 0;">
               <div style="border-top:1px dashed {self._color_to_rgba(border, 82)}; height:1px;"></div>
             </td>
           </tr>

@@ -3,14 +3,17 @@ import time
 from PySide6.QtCore import QThread, Signal
 
 from .api import (
+    fetch_latest_release_info,
     fetch_followed_rooms,
     fetch_current_user,
     get_all_streams,
     get_raw_stream_list,
+    is_version_newer,
     get_roomid_by_room_url_key,
     parse_room_url_key,
     session,
 )
+from .app_meta import APP_VERSION, LATEST_RELEASE_URL
 
 
 class LoadRoomThread(QThread):
@@ -177,3 +180,33 @@ class LoadCurrentUserThread(QThread):
             self.done.emit(data, bool(data.get('is_login')))
         except Exception:
             self.done.emit({}, False)
+
+
+class CheckForUpdatesThread(QThread):
+    checked = Signal(dict)
+
+    def run(self):
+        try:
+            release = fetch_latest_release_info()
+            latest_version = release.get('tag_name') or ''
+            payload = {
+                'ok': True,
+                'current_version': APP_VERSION,
+                'latest_version': latest_version,
+                'release_name': release.get('name') or latest_version,
+                'release_url': release.get('html_url') or LATEST_RELEASE_URL,
+                'published_at': release.get('published_at') or '',
+                'has_update': bool(latest_version) and is_version_newer(latest_version, APP_VERSION),
+            }
+        except Exception as exc:
+            payload = {
+                'ok': False,
+                'current_version': APP_VERSION,
+                'latest_version': '',
+                'release_name': '',
+                'release_url': LATEST_RELEASE_URL,
+                'published_at': '',
+                'has_update': False,
+                'error': str(exc),
+            }
+        self.checked.emit(payload)

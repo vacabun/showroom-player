@@ -9,6 +9,7 @@ A desktop GUI player for watching [SHOWROOM](https://www.showroom-live.com) live
 - Browse live rooms, switch stream quality, and watch comments in real time
 - Log in from the embedded browser to send comments while watching
 - Capture the current video frame to the clipboard and save it as a PNG in the system Downloads folder
+- Check GitHub releases on startup and prompt when a newer version is available
 - Record the current live stream in single-view or multi-view mode to the system Downloads folder
 
 ## Requirements

@@ -109,6 +109,44 @@ class UserInfoDialog(QDialog):
 
         self._apply_style()
 
+
+class UpdateDialog(QDialog):
+    def __init__(self, current_version, latest_version, release_url, parent=None):
+        super().__init__(parent)
+        self._release_url = str(release_url or '')
+        self.setWindowTitle('Update Available')
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        title = QLabel('A new version is available.')
+        title_font = QFont()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        layout.addWidget(title)
+
+        details = QLabel(
+            f'Current version: {current_version}\n'
+            f'Latest version: {latest_version}\n'
+            f'Release page: {self._release_url}'
+        )
+        details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        details.setWordWrap(True)
+        layout.addWidget(details)
+
+        buttons = QDialogButtonBox(self)
+        self._open_button = buttons.addButton('Open Release Page', QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton('Later', QDialogButtonBox.ButtonRole.RejectRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def should_open_release_page(self):
+        return self.result() == QDialog.DialogCode.Accepted and bool(self._release_url)
+
     def _build_header_card(self):
         card = QFrame()
         card.setObjectName('userInfoHero')

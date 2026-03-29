@@ -1,9 +1,12 @@
 import time
 import json
+import re
 from pathlib import Path
 import requests
 import m3u8
 from urllib.parse import urlparse
+
+from .app_meta import LATEST_RELEASE_API_URL
 
 fake_headers = {
     'Accept': '*/*',
@@ -76,6 +79,45 @@ def fetch_current_user():
     if not isinstance(data, dict):
         return {}
     return data
+
+
+def parse_version_tuple(version_text):
+    text = str(version_text or '').strip()
+    if text.lower().startswith('v'):
+        text = text[1:]
+    numbers = [int(piece) for piece in re.findall(r'\d+', text)]
+    return tuple(numbers)
+
+
+def is_version_newer(candidate_version, current_version):
+    candidate = parse_version_tuple(candidate_version)
+    current = parse_version_tuple(current_version)
+    length = max(len(candidate), len(current))
+    candidate += (0,) * (length - len(candidate))
+    current += (0,) * (length - len(current))
+    return candidate > current
+
+
+def fetch_latest_release_info(timeout=5):
+    response = requests.get(
+        LATEST_RELEASE_API_URL,
+        headers={
+            'Accept': 'application/vnd.github+json',
+            'User-Agent': fake_headers['User-Agent'],
+        },
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError('Unexpected release payload.')
+    return {
+        'tag_name': str(data.get('tag_name') or '').strip(),
+        'name': str(data.get('name') or '').strip(),
+        'html_url': str(data.get('html_url') or '').strip(),
+        'body': str(data.get('body') or ''),
+        'published_at': str(data.get('published_at') or '').strip(),
+    }
 
 
 def fetch_current_user_name():

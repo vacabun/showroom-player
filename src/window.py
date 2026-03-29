@@ -1,7 +1,7 @@
 from html import escape
 
-from PySide6.QtCore import QEvent, Qt, QUrl, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QImage, QPalette
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QGuiApplication, QImage, QPalette
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -27,11 +27,13 @@ from PySide6.QtWidgets import (
 )
 
 from .api import clear_session_cookies, load_session_cookies, save_session_cookies
+from .app_meta import APP_NAME, APP_VERSION, LATEST_RELEASE_URL
 from .branding import app_icon
-from .dialogs import LoginDialog, UserInfoDialog
+from .dialogs import LoginDialog, UpdateDialog, UserInfoDialog
 from .media_output import build_timestamped_download_path
 from .recording import StreamRecorder
 from .threads import (
+    CheckForUpdatesThread,
     LiveCommentsThread,
     LoadCurrentUserThread,
     LiveRoomsThread,
@@ -550,7 +552,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Showroom Player')
+        self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
         self.setMinimumSize(1040, 700)
         self.resize(1720, 980)
@@ -570,6 +572,8 @@ class MainWindow(QMainWindow):
         self._active_comment_tile_index = None
         self._selected_multi_tile_index = 0
         self._single_latest_frame_image = QImage()
+        self._update_check_thread = None
+        self._update_dialog_visible = False
 
         self._live_comments_thread = None
         self._load_room_thread = None
@@ -582,6 +586,7 @@ class MainWindow(QMainWindow):
         self._set_mode('single')
         self._restore_cached_login()
         self._refresh_rooms()
+        QTimer.singleShot(0, self._check_for_updates)
 
     # ── UI ──────────────────────────────────────────────────────────────────
 
@@ -844,6 +849,39 @@ class MainWindow(QMainWindow):
 
         return box
 
+    # ── Updates ─────────────────────────────────────────────────────────────
+
+    def _check_for_updates(self):
+        if self._update_check_thread is not None and self._update_check_thread.isRunning():
+            return
+        thread = CheckForUpdatesThread(self)
+        thread.checked.connect(self._on_update_check_finished)
+        thread.finished.connect(lambda: setattr(self, '_update_check_thread', None))
+        self._update_check_thread = thread
+        thread.start()
+
+    def _on_update_check_finished(self, result):
+        if not result.get('ok'):
+            return
+        if not result.get('has_update'):
+            return
+        if self._update_dialog_visible:
+            return
+        self._show_update_dialog(result)
+
+    def _show_update_dialog(self, result):
+        self._update_dialog_visible = True
+        try:
+            latest_version = result.get('latest_version') or 'unknown'
+            current_version = result.get('current_version') or APP_VERSION
+            release_url = result.get('release_url') or LATEST_RELEASE_URL
+
+            dialog = UpdateDialog(current_version, latest_version, release_url, self)
+            if dialog.exec() == QDialog.DialogCode.Accepted and dialog.should_open_release_page():
+                QDesktopServices.openUrl(QUrl(release_url))
+        finally:
+            self._update_dialog_visible = False
+
     # ── Player ──────────────────────────────────────────────────────────────
 
     def _setup_player(self):
@@ -1088,7 +1126,7 @@ class MainWindow(QMainWindow):
             self.play_btn.setEnabled(True)
             self._play_current()
 
-        self.setWindowTitle(f'Showroom Player - {room_name}')
+        self.setWindowTitle(f'{APP_NAME} - {room_name}')
         self.status_bar.showMessage(f'{room_name}  ·  {len(streams)} quality options')
         self._update_single_record_ui()
         if self._mode == 'single':
@@ -1975,6 +2013,7 @@ class MainWindow(QMainWindow):
         self._wait_for_thread(getattr(self, '_live_rooms_thread', None))
         self._wait_for_thread(getattr(self, '_current_user_thread', None))
         self._wait_for_thread(getattr(self, '_post_thread', None))
+        self._wait_for_thread(getattr(self, '_update_check_thread', None))
         for thread in list(self._multi_load_threads.values()):
             self._wait_for_thread(thread)
         self.player.stop()

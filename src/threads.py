@@ -1,3 +1,4 @@
+import random
 import time
 from PySide6.QtCore import QThread, Signal
 
@@ -40,6 +41,9 @@ class LoadRoomThread(QThread):
 
 
 class LiveCommentsThread(QThread):
+    MIN_POLL_INTERVAL = 0.5
+    MAX_POLL_INTERVAL = 1.5
+
     new_comments = Signal(list)
     error = Signal(str)
 
@@ -73,10 +77,14 @@ class LiveCommentsThread(QThread):
                     self.new_comments.emit(new)
             except Exception as e:
                 self.error.emit(str(e))
-            for _ in range(50):
-                if not self._running:
-                    break
-                time.sleep(0.1)
+            self._sleep_between_polls()
+
+    def _sleep_between_polls(self):
+        remaining = random.uniform(self.MIN_POLL_INTERVAL, self.MAX_POLL_INTERVAL)
+        while self._running and remaining > 0:
+            step = min(0.1, remaining)
+            time.sleep(step)
+            remaining -= step
 
     def stop(self):
         self._running = False

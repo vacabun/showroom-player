@@ -1,7 +1,7 @@
 from html import escape
 
 from PySide6.QtCore import QEvent, Qt, QUrl, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QPalette
+from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QImage, QPalette
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 from .api import clear_session_cookies, load_session_cookies, save_session_cookies
 from .branding import app_icon
 from .dialogs import LoginDialog, UserInfoDialog
+from .media_output import build_timestamped_download_path
 from .recording import StreamRecorder
 from .threads import (
     LiveCommentsThread,
@@ -42,6 +43,7 @@ from .threads import (
 class MultiRoomTile(QWidget):
     selected = Signal(int)
     recording_notice = Signal(str)
+    screenshot_requested = Signal(int)
 
     def __init__(self, index):
         super().__init__()
@@ -53,6 +55,7 @@ class MultiRoomTile(QWidget):
         self.streams = []
         self.request_serial = 0
         self._selected = False
+        self._latest_frame_image = QImage()
 
         self.setObjectName(f'multiRoomTile{index}')
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -72,6 +75,10 @@ class MultiRoomTile(QWidget):
         self.meta_label.setFont(QFont('Menlo', 9))
         self.record_indicator = QLabel()
         self.record_indicator.setFixedSize(10, 10)
+        self.shot_btn = QPushButton('Shot')
+        self.shot_btn.setFixedWidth(68)
+        self.shot_btn.setEnabled(False)
+        self.shot_btn.clicked.connect(self._request_screenshot)
         self.record_btn = QPushButton('Start REC')
         self.record_btn.setFixedWidth(88)
         self.record_btn.setEnabled(False)
@@ -82,6 +89,7 @@ class MultiRoomTile(QWidget):
         header.addStretch()
         header.addWidget(self.meta_label)
         header.addSpacing(8)
+        header.addWidget(self.shot_btn)
         header.addWidget(self.record_indicator)
         header.addWidget(self.record_btn)
         layout.addLayout(header)
@@ -131,6 +139,7 @@ class MultiRoomTile(QWidget):
         self.player.setVideoOutput(self.video_widget)
         self.player.errorOccurred.connect(self._on_player_error)
         self.player.playbackStateChanged.connect(self._on_playback_state_changed)
+        self._connect_video_sink(self.video_widget)
         self.recorder = StreamRecorder(self)
         self.recorder.state_changed.connect(self._update_record_ui)
         self.recorder.started.connect(self._on_recording_started)
@@ -258,6 +267,7 @@ class MultiRoomTile(QWidget):
         )
         self.play_btn.setStyleSheet(tile_button_style)
         self.stop_btn.setStyleSheet(tile_button_style)
+        self.shot_btn.setStyleSheet(tile_button_style)
         self.record_btn.setStyleSheet(record_button_style)
         self.stream_combo.setStyleSheet(combo_style)
         groove_color = MainWindow._color_to_css(MainWindow._mix_colors(border, window, 0.30))
@@ -285,6 +295,31 @@ class MultiRoomTile(QWidget):
     def set_selected(self, selected):
         self._selected = selected
 
+    def _connect_video_sink(self, video_widget):
+        video_sink_getter = getattr(video_widget, 'videoSink', None)
+        if not callable(video_sink_getter):
+            return
+        video_sink = video_sink_getter()
+        if video_sink is None:
+            return
+        video_sink.videoFrameChanged.connect(self._on_video_frame_changed)
+
+    def _on_video_frame_changed(self, frame):
+        if not frame.isValid():
+            return
+        image = frame.toImage()
+        if image.isNull():
+            return
+        self._latest_frame_image = image.copy()
+
+    def current_frame_image(self):
+        if self._latest_frame_image.isNull():
+            return QImage()
+        return self._latest_frame_image.copy()
+
+    def _request_screenshot(self):
+        self.screenshot_requested.emit(self.index)
+
     def start_loading(self, room_input):
         self.stop_recording(silent=True)
         self.request_serial += 1
@@ -293,6 +328,7 @@ class MultiRoomTile(QWidget):
         self.room_id = 0
         self.live_id = 0
         self.streams = []
+        self._latest_frame_image = QImage()
         self.player.stop()
         self.player.setSource(QUrl())
         self.stream_combo.blockSignals(True)
@@ -302,6 +338,7 @@ class MultiRoomTile(QWidget):
         self.play_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
         self.play_btn.setText('▶')
+        self.shot_btn.setEnabled(False)
         self.record_btn.setEnabled(False)
         self.title_label.setText(f'Slot {self.index + 1}')
         self.meta_label.setText('Loading')
@@ -328,6 +365,7 @@ class MultiRoomTile(QWidget):
         self.stream_combo.setEnabled(bool(self.streams))
         self.play_btn.setEnabled(bool(self.streams))
         self.stop_btn.setEnabled(bool(self.streams))
+        self.shot_btn.setEnabled(bool(self.streams))
         self.record_btn.setEnabled(bool(self.streams))
         if self.streams:
             self.stream_combo.setCurrentIndex(0)
@@ -341,6 +379,7 @@ class MultiRoomTile(QWidget):
         self.room_id = 0
         self.live_id = 0
         self.streams = []
+        self._latest_frame_image = QImage()
         self.player.stop()
         self.player.setSource(QUrl())
         self.stream_combo.blockSignals(True)
@@ -350,6 +389,7 @@ class MultiRoomTile(QWidget):
         self.play_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
         self.play_btn.setText('▶')
+        self.shot_btn.setEnabled(False)
         self.record_btn.setEnabled(False)
         self.title_label.setText(f'Slot {self.index + 1}')
         self.meta_label.setText('Error')
@@ -363,6 +403,7 @@ class MultiRoomTile(QWidget):
         self.room_id = 0
         self.live_id = 0
         self.streams = []
+        self._latest_frame_image = QImage()
         self.player.stop()
         self.player.setSource(QUrl())
         self.stream_combo.blockSignals(True)
@@ -372,6 +413,7 @@ class MultiRoomTile(QWidget):
         self.play_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
         self.play_btn.setText('▶')
+        self.shot_btn.setEnabled(False)
         self.record_btn.setEnabled(False)
         self.title_label.setText(f'Slot {self.index + 1}')
         self.meta_label.setText('Empty')
@@ -527,6 +569,7 @@ class MainWindow(QMainWindow):
         self._comment_entries = []
         self._active_comment_tile_index = None
         self._selected_multi_tile_index = 0
+        self._single_latest_frame_image = QImage()
 
         self._live_comments_thread = None
         self._load_room_thread = None
@@ -658,11 +701,16 @@ class MainWindow(QMainWindow):
         self.single_room_label.setFont(QFont('Menlo', 10))
         self.single_record_indicator = QLabel()
         self.single_record_indicator.setFixedSize(10, 10)
+        self.single_shot_btn = QPushButton('Shot')
+        self.single_shot_btn.setFixedWidth(72)
+        self.single_shot_btn.setEnabled(False)
+        self.single_shot_btn.clicked.connect(self._take_single_screenshot)
         self.single_record_btn = QPushButton('Start REC')
         self.single_record_btn.setFixedWidth(96)
         self.single_record_btn.setEnabled(False)
         self.single_record_btn.clicked.connect(self._toggle_single_recording)
         header_layout.addWidget(self.single_room_label, stretch=1)
+        header_layout.addWidget(self.single_shot_btn)
         header_layout.addWidget(self.single_record_indicator)
         header_layout.addWidget(self.single_record_btn)
         layout.addWidget(header)
@@ -746,6 +794,7 @@ class MainWindow(QMainWindow):
         self._multi_tiles = [MultiRoomTile(index) for index in range(9)]
         for tile in self._multi_tiles:
             tile.selected.connect(self._on_multi_tile_selected)
+            tile.screenshot_requested.connect(self._take_multi_screenshot)
         return page
 
     def _build_comment_box(self):
@@ -805,6 +854,7 @@ class MainWindow(QMainWindow):
         self.player.setVideoOutput(self.video_widget)
         self.player.playbackStateChanged.connect(self._on_playback_state_changed)
         self.player.errorOccurred.connect(self._on_player_error)
+        self._connect_single_video_sink(self.video_widget)
         self._single_recorder = StreamRecorder(self)
         self._single_recorder.state_changed.connect(self._update_single_record_ui)
         self._single_recorder.started.connect(self._on_single_recording_started)
@@ -855,6 +905,50 @@ class MainWindow(QMainWindow):
     def _on_volume_changed(self, value):
         self.audio_output.setVolume(value / 100)
 
+    def _connect_single_video_sink(self, video_widget):
+        video_sink_getter = getattr(video_widget, 'videoSink', None)
+        if not callable(video_sink_getter):
+            return
+        video_sink = video_sink_getter()
+        if video_sink is None:
+            return
+        video_sink.videoFrameChanged.connect(self._on_single_video_frame_changed)
+
+    def _on_single_video_frame_changed(self, frame):
+        if not frame.isValid():
+            return
+        image = frame.toImage()
+        if image.isNull():
+            return
+        self._single_latest_frame_image = image.copy()
+
+    def _capture_screenshot(self, image, room_name, label):
+        if image is None or image.isNull():
+            self.status_bar.showMessage(f'{label} screenshot failed: no video frame available.')
+            return False
+
+        output_path = build_timestamped_download_path(room_name or 'showroom-room', 'png', '_screenshot')
+        if not image.save(str(output_path), 'PNG'):
+            self.status_bar.showMessage(f'{label} screenshot failed: could not save PNG.')
+            return False
+
+        QGuiApplication.clipboard().setImage(image)
+        self.status_bar.showMessage(f'{label} screenshot copied and saved: {output_path}')
+        return True
+
+    def _take_single_screenshot(self):
+        if not self._streams:
+            self.status_bar.showMessage('No stream available to capture.')
+            return
+        self._capture_screenshot(self._single_latest_frame_image.copy(), self._single_room_name, 'Single view')
+
+    def _take_multi_screenshot(self, tile_index):
+        tile = self._multi_tiles[tile_index]
+        if not tile.streams:
+            self.status_bar.showMessage(f'Tile {tile.index + 1} has no stream to capture.')
+            return
+        self._capture_screenshot(tile.current_frame_image(), tile.room_name, f'Tile {tile.index + 1}')
+
     def _toggle_single_recording(self):
         if self._single_recorder.is_recording():
             self._stop_single_recording()
@@ -881,6 +975,7 @@ class MainWindow(QMainWindow):
     def _update_single_record_ui(self, _recording=None):
         recorder = getattr(self, '_single_recorder', None)
         recording = recorder.is_recording() if recorder is not None else False
+        self.single_shot_btn.setEnabled(bool(self._streams))
         self.single_record_btn.setText('Stop REC' if recording else 'Start REC')
         self.single_record_btn.setEnabled(bool(self._streams) or recording)
         self.stream_combo.setEnabled(bool(self._streams) and not recording)
@@ -961,6 +1056,7 @@ class MainWindow(QMainWindow):
         self._single_room_name = ''
         self._single_room_id = 0
         self._single_live_id = 0
+        self._single_latest_frame_image = QImage()
         self.single_room_label.setText('Loading room...')
         self.play_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
@@ -999,6 +1095,7 @@ class MainWindow(QMainWindow):
             self._set_comment_room(room_id, live_id, room_name, mode='single')
 
     def _on_room_load_error(self, msg):
+        self._single_latest_frame_image = QImage()
         self.single_room_label.setText('No room loaded')
         self._update_single_record_ui()
         self.status_bar.showMessage(f'Error: {msg}')
@@ -1503,6 +1600,7 @@ class MainWindow(QMainWindow):
             self.play_btn,
             self.stop_btn,
             self.mute_btn,
+            self.single_shot_btn,
             self.single_record_btn,
             self.send_btn,
         ):

@@ -1,9 +1,8 @@
-import re
 import shutil
-from datetime import datetime
-from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, QStandardPaths, QTimer, Signal
+from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+
+from .media_output import build_timestamped_download_path
 
 
 class StreamRecorder(QObject):
@@ -166,25 +165,4 @@ class StreamRecorder(QObject):
 
     @classmethod
     def _build_output_path(cls, room_name):
-        downloads_dir = cls._downloads_dir()
-        downloads_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        base_name = f'{cls._sanitize_room_name(room_name)}_{timestamp}'
-        path = downloads_dir / f'{base_name}.mp4'
-        suffix = 1
-        while path.exists():
-            path = downloads_dir / f'{base_name}_{suffix:02d}.mp4'
-            suffix += 1
-        return str(path)
-
-    @staticmethod
-    def _downloads_dir():
-        path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
-        if path:
-            return Path(path)
-        return Path.home() / 'Downloads'
-
-    @staticmethod
-    def _sanitize_room_name(room_name):
-        cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', '_', str(room_name or '')).strip(' .')
-        return cleaned or 'showroom-room'
+        return str(build_timestamped_download_path(room_name, 'mp4'))

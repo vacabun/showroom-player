@@ -35,7 +35,11 @@ class StreamRecorder(QObject):
             self.error.emit('Recording requires ffmpeg to be available in PATH.')
             return False
 
-        self._output_path = self._build_output_path(room_name)
+        try:
+            self._output_path = self._build_output_path(room_name)
+        except OSError as error:
+            self.error.emit(f'Could not prepare the recording path: {error}')
+            return False
         self._log_buffer = ''
         self._has_started = False
         self._stopping = False
@@ -67,23 +71,14 @@ class StreamRecorder(QObject):
     def stop_recording(self, silent=False):
         if not self.is_recording():
             return
+        if self._stopping:
+            self._announce_stop = self._announce_stop and not silent
+            return
         self._stopping = True
         self._announce_stop = not silent
-        self._process.write(b'q\n')
-        QTimer.singleShot(3000, self._terminate_if_needed)
-
-    def wait_for_stop(self, timeout_ms=5000):
-        if self._process is None:
-            return
-        if self._process.state() == QProcess.ProcessState.NotRunning:
-            return
-        if self._process.waitForFinished(timeout_ms):
-            return
-        self._process.terminate()
-        if self._process.waitForFinished(1500):
-            return
-        self._process.kill()
-        self._process.waitForFinished(1500)
+        process = self._process
+        process.write(b'q\n')
+        QTimer.singleShot(3000, lambda: self._terminate_if_needed(process))
 
     def _on_started(self):
         self._has_started = True
@@ -136,15 +131,14 @@ class StreamRecorder(QObject):
 
         self.error.emit(message or f'Recording stopped unexpectedly (exit code {exit_code}).')
 
-    def _terminate_if_needed(self):
-        if not self.is_recording():
-            return
-        self._process.terminate()
-        QTimer.singleShot(1500, self._kill_if_needed)
+    def _terminate_if_needed(self, process):
+        if process is self._process and self.is_recording():
+            process.terminate()
+            QTimer.singleShot(1500, lambda: self._kill_if_needed(process))
 
-    def _kill_if_needed(self):
-        if self.is_recording():
-            self._process.kill()
+    def _kill_if_needed(self, process):
+        if process is self._process and self.is_recording():
+            process.kill()
 
     def _cleanup_process(self):
         if self._process is not None:

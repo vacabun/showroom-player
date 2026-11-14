@@ -31,16 +31,23 @@ class LoadRoomThread(QThread):
             self.status.emit('Loading room info...')
             room_id, room_name, is_live, live_id = get_roomid_by_room_url_key(room_url_key)
 
+            if self.isInterruptionRequested():
+                return
+
             if not is_live:
                 self.error.emit(f'"{room_name}" is offline')
                 return
 
             self.status.emit('Loading streams...')
             url_list = get_raw_stream_list(room_id)
-            streams = get_all_streams(url_list)
-            self.streams_ready.emit(streams, room_name, room_id, live_id)
+            if self.isInterruptionRequested():
+                return
+            streams = get_all_streams(url_list, interrupted=self.isInterruptionRequested)
+            if not self.isInterruptionRequested():
+                self.streams_ready.emit(streams, room_name, room_id, live_id)
         except Exception as e:
-            self.error.emit(str(e))
+            if not self.isInterruptionRequested():
+                self.error.emit(str(e))
 
 
 class LiveCommentsThread(QThread):
@@ -145,6 +152,7 @@ class SendCommentThread(QThread):
     def run(self):
         try:
             resp = session.get('https://www.showroom-live.com/api/csrf_token', timeout=10)
+            resp.raise_for_status()
             csrf_token = resp.json().get('csrf_token', '')
             if not csrf_token:
                 self.error.emit('Failed to get CSRF token')
@@ -161,12 +169,13 @@ class SendCommentThread(QThread):
                 },
                 timeout=10,
             )
+            resp.raise_for_status()
             data = resp.json()
-            if data.get('ok') == 1:
+            if data.get('ok') in (1, '1'):
                 self.success.emit()
             else:
                 msg = data.get('message') or data.get('error') or 'Failed to post comment'
-                self.error.emit(msg)
+                self.error.emit(str(msg))
         except Exception as e:
             self.error.emit(str(e))
 

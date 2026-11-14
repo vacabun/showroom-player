@@ -273,10 +273,12 @@ def compact_stream_label(parts):
     return parts[0]
 
 
-def get_all_streams(url_list):
+def get_all_streams(url_list, *, interrupted=None):
     """Returns [(label, url), ...], HLS only, sorted by quality descending."""
     streams = []
     for item in url_list:
+        if interrupted is not None and interrupted():
+            return []
         stream_type = item.get('type', 'unknown')
         url = item['url']
         quality = item.get('quality', '')

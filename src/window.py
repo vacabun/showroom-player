@@ -1,8 +1,8 @@
 from html import escape
 
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QGuiApplication, QImage, QPalette
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QGuiApplication, QPalette
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QComboBox,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QSlider,
@@ -31,7 +32,7 @@ from .app_meta import APP_NAME, APP_VERSION, LATEST_RELEASE_URL
 from .branding import app_icon
 from .dialogs import LoginDialog, UpdateDialog, UserInfoDialog
 from .media_output import build_timestamped_download_path
-from .recording import StreamRecorder
+from .playback_session import PlaybackSession
 from .threads import (
     CheckForUpdatesThread,
     LiveCommentsThread,
@@ -55,24 +56,22 @@ class MultiRoomTile(QWidget):
         self.room_id = 0
         self.live_id = 0
         self.streams = []
-        self.request_serial = 0
         self._selected = False
-        self._latest_frame_image = QImage()
 
         self.setObjectName(f'multiRoomTile{index}')
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMinimumSize(220, 150)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(7, 7, 7, 7)
+        layout.setSpacing(4)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         self.indicator_label = QLabel()
         self.indicator_label.setFixedSize(10, 10)
         self.title_label = QLabel(f'Slot {index + 1}')
-        self.title_label.setFont(QFont('Menlo', 10))
+        self.title_label.setStyleSheet('font-weight: 600;')
+        self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.meta_label = QLabel('Empty')
         self.meta_label.setFont(QFont('Menlo', 9))
         self.record_indicator = QLabel()
@@ -87,8 +86,7 @@ class MultiRoomTile(QWidget):
         self.record_btn.clicked.connect(self._toggle_recording)
         header.addWidget(self.indicator_label)
         header.addSpacing(4)
-        header.addWidget(self.title_label)
-        header.addStretch()
+        header.addWidget(self.title_label, stretch=1)
         header.addWidget(self.meta_label)
         header.addSpacing(8)
         header.addWidget(self.shot_btn)
@@ -98,7 +96,7 @@ class MultiRoomTile(QWidget):
 
         self.video_widget = QVideoWidget()
         self.video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.video_widget.setMinimumHeight(0)
+        self.video_widget.setMinimumHeight(18)
         layout.addWidget(self.video_widget, stretch=1)
 
         controls = QHBoxLayout()
@@ -128,21 +126,13 @@ class MultiRoomTile(QWidget):
         layout.addLayout(controls)
 
         self.status_label = QLabel('Double-click a room on the left to load here.')
-        self.status_label.setWordWrap(True)
-        self.status_label.setFont(QFont('Menlo', 9))
-        self.status_label.setFixedHeight(32)
+        self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         layout.addWidget(self.status_label)
 
-        self.player = QMediaPlayer()
-        self.audio_output = QAudioOutput()
-        self.audio_output.setMuted(False)
-        self.audio_output.setVolume(self.volume_slider.value() / 100)
-        self.player.setAudioOutput(self.audio_output)
-        self.player.setVideoOutput(self.video_widget)
-        self.player.errorOccurred.connect(self._on_player_error)
-        self.player.playbackStateChanged.connect(self._on_playback_state_changed)
-        self._connect_video_sink(self.video_widget)
-        self.recorder = StreamRecorder(self)
+        self.playback = PlaybackSession(self.video_widget, self.volume_slider.value() / 100, self)
+        self.playback.state_changed.connect(self._on_playback_state_changed)
+        self.playback.error_occurred.connect(self._on_player_error)
+        self.recorder = self.playback.recorder
         self.recorder.state_changed.connect(self._update_record_ui)
         self.recorder.started.connect(self._on_recording_started)
         self.recorder.stopped.connect(self._on_recording_stopped)
@@ -297,42 +287,19 @@ class MultiRoomTile(QWidget):
     def set_selected(self, selected):
         self._selected = selected
 
-    def _connect_video_sink(self, video_widget):
-        video_sink_getter = getattr(video_widget, 'videoSink', None)
-        if not callable(video_sink_getter):
-            return
-        video_sink = video_sink_getter()
-        if video_sink is None:
-            return
-        video_sink.videoFrameChanged.connect(self._on_video_frame_changed)
-
-    def _on_video_frame_changed(self, frame):
-        if not frame.isValid():
-            return
-        image = frame.toImage()
-        if image.isNull():
-            return
-        self._latest_frame_image = image.copy()
-
     def current_frame_image(self):
-        if self._latest_frame_image.isNull():
-            return QImage()
-        return self._latest_frame_image.copy()
+        return self.playback.screenshot()
 
     def _request_screenshot(self):
         self.screenshot_requested.emit(self.index)
 
     def start_loading(self, room_input):
-        self.stop_recording(silent=True)
-        self.request_serial += 1
+        request = self.playback.reset_room()
         self.room_key = room_input
         self.room_name = ''
         self.room_id = 0
         self.live_id = 0
         self.streams = []
-        self._latest_frame_image = QImage()
-        self.player.stop()
-        self.player.setSource(QUrl())
         self.stream_combo.blockSignals(True)
         self.stream_combo.clear()
         self.stream_combo.blockSignals(False)
@@ -343,9 +310,10 @@ class MultiRoomTile(QWidget):
         self.shot_btn.setEnabled(False)
         self.record_btn.setEnabled(False)
         self.title_label.setText(f'Slot {self.index + 1}')
+        self.title_label.setToolTip('')
         self.meta_label.setText('Loading')
         self.status_label.setText(f'Opening {room_input}...')
-        return self.request_serial
+        return request
 
     def set_loading_status(self, message):
         self.meta_label.setText('Loading')
@@ -358,6 +326,7 @@ class MultiRoomTile(QWidget):
         self.live_id = live_id
         self.room_key = room_key
         self.title_label.setText(room_name)
+        self.title_label.setToolTip(room_name)
         self.meta_label.setText(f'#{self.index + 1}  {len(self.streams)} streams')
         self.stream_combo.blockSignals(True)
         self.stream_combo.clear()
@@ -376,14 +345,11 @@ class MultiRoomTile(QWidget):
             self.status_label.setText('No playable stream found.')
 
     def set_error(self, message):
-        self.stop_recording(silent=True)
+        self.playback.reset_room()
         self.room_name = ''
         self.room_id = 0
         self.live_id = 0
         self.streams = []
-        self._latest_frame_image = QImage()
-        self.player.stop()
-        self.player.setSource(QUrl())
         self.stream_combo.blockSignals(True)
         self.stream_combo.clear()
         self.stream_combo.blockSignals(False)
@@ -394,20 +360,17 @@ class MultiRoomTile(QWidget):
         self.shot_btn.setEnabled(False)
         self.record_btn.setEnabled(False)
         self.title_label.setText(f'Slot {self.index + 1}')
+        self.title_label.setToolTip('')
         self.meta_label.setText('Error')
         self.status_label.setText(message)
 
     def clear_tile(self):
-        self.stop_recording(silent=True)
-        self.request_serial += 1
+        self.playback.reset_room()
         self.room_key = ''
         self.room_name = ''
         self.room_id = 0
         self.live_id = 0
         self.streams = []
-        self._latest_frame_image = QImage()
-        self.player.stop()
-        self.player.setSource(QUrl())
         self.stream_combo.blockSignals(True)
         self.stream_combo.clear()
         self.stream_combo.blockSignals(False)
@@ -418,6 +381,7 @@ class MultiRoomTile(QWidget):
         self.shot_btn.setEnabled(False)
         self.record_btn.setEnabled(False)
         self.title_label.setText(f'Slot {self.index + 1}')
+        self.title_label.setToolTip('')
         self.meta_label.setText('Empty')
         self.status_label.setText('Double-click a room on the left to load here.')
 
@@ -425,8 +389,7 @@ class MultiRoomTile(QWidget):
         return bool(self.room_id and self.live_id and self.streams)
 
     def stop(self):
-        self.player.stop()
-        self.player.setSource(QUrl())
+        self.playback.stop(clear_source=True)
         self.play_btn.setText('▶')
         self.stop_btn.setEnabled(False)
 
@@ -442,25 +405,18 @@ class MultiRoomTile(QWidget):
             self.status_label.setText(f'Playback error: {error_string}')
 
     def _toggle_play(self):
-        state = self.player.playbackState()
-        if state == QMediaPlayer.PlaybackState.PlayingState:
-            self.player.pause()
-        elif state == QMediaPlayer.PlaybackState.PausedState:
-            self.player.play()
-        else:
-            self._play_current()
+        self.playback.toggle(self._play_current)
 
     def _play_current(self):
         idx = self.stream_combo.currentIndex()
         if idx < 0 or idx >= len(self.streams):
             return
         label, url = self.streams[idx]
-        self.player.setSource(QUrl(url))
-        self.player.play()
+        self.playback.play(url)
         self.status_label.setText(label)
 
     def _stop_player(self):
-        self.player.stop()
+        self.playback.stop()
 
     def _on_stream_changed(self, idx):
         if idx < 0 or idx >= len(self.streams):
@@ -468,7 +424,7 @@ class MultiRoomTile(QWidget):
             self.stop_btn.setEnabled(False)
             return
         self.play_btn.setEnabled(True)
-        if self.player.playbackState() != QMediaPlayer.PlaybackState.StoppedState:
+        if self.playback.state != QMediaPlayer.PlaybackState.StoppedState:
             self._play_current()
         else:
             label, _url = self.streams[idx]
@@ -481,13 +437,10 @@ class MultiRoomTile(QWidget):
         self.stop_btn.setEnabled(bool(self.streams) and (playing or paused))
 
     def _on_volume_changed(self, value):
-        self.audio_output.setVolume(value / 100)
+        self.playback.set_volume(value / 100)
 
     def stop_recording(self, silent=False):
         self.recorder.stop_recording(silent=silent)
-
-    def wait_for_recording_stop(self):
-        self.recorder.wait_for_stop()
 
     def _toggle_recording(self):
         if self.recorder.is_recording():
@@ -536,6 +489,7 @@ class MainWindow(QMainWindow):
         '#7b8c34',
     )
     MAX_COMMENT_ENTRIES = 240
+    COMMENT_PRUNE_BATCH = 40
     MULTI_LAYOUTS = {
         '2 x 2': {'rows': 2, 'cols': 2, 'positions': ((0, 0), (0, 1), (1, 0), (1, 1))},
         '2 x 3': {'rows': 2, 'cols': 3, 'positions': ((0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2))},
@@ -569,14 +523,19 @@ class MainWindow(QMainWindow):
         self._comment_room_id = 0
         self._comment_live_id = 0
         self._comment_entries = []
+        self._rendering_chat = False
+        self._chat_has_updates = False
+        self._comment_target_version = 0
+        self._post_thread = None
         self._active_comment_tile_index = None
         self._selected_multi_tile_index = 0
-        self._single_latest_frame_image = QImage()
         self._update_check_thread = None
         self._update_dialog_visible = False
 
         self._live_comments_thread = None
-        self._load_room_thread = None
+        self._comment_threads = set()
+        self._closing = False
+        self._single_load_threads = {}
         self._live_rooms_thread = None
         self._multi_load_threads = {}
 
@@ -594,16 +553,24 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(10, 10, 10, 6)
-        root.setSpacing(8)
+        root.setContentsMargins(14, 12, 14, 8)
+        root.setSpacing(6)
 
-        top = QHBoxLayout()
+        toolbar = QWidget()
+        toolbar.setObjectName('roomToolbar')
+        toolbar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        top = QHBoxLayout(toolbar)
+        top.setContentsMargins(6, 3, 6, 3)
+        top.setSpacing(8)
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText('Room key or https://www.showroom-live.com/r/...')
+        self.url_input.setClearButtonEnabled(True)
+        self.url_input.setAccessibleName('SHOWROOM room address')
         self.url_input.returnPressed.connect(self.load_room)
 
         self.load_btn = QPushButton('Open')
-        self.load_btn.setFixedWidth(72)
+        self.load_btn.setMinimumWidth(76)
+        self.load_btn.setProperty('primary', True)
         self.load_btn.clicked.connect(self.load_room)
 
         self.mode_btn = QPushButton('Multi View')
@@ -611,20 +578,20 @@ class MainWindow(QMainWindow):
         self.mode_btn.clicked.connect(self._toggle_mode)
 
         self.login_btn = QPushButton('Sign In')
-        self.login_btn.setFixedWidth(88)
+        self.login_btn.setMinimumWidth(88)
+        self.login_btn.setMaximumWidth(180)
         self.login_btn.clicked.connect(self._on_auth_button_clicked)
 
-        self.user_info_btn = QPushButton('My Info')
-        self.user_info_btn.setFixedWidth(84)
-        self.user_info_btn.setEnabled(False)
-        self.user_info_btn.clicked.connect(self._open_user_info)
+        self.account_menu = QMenu(self.login_btn)
+        self.account_menu.addAction('Profile', self._open_user_info)
+        self.account_menu.addSeparator()
+        self.account_menu.addAction('Sign Out', self._logout)
 
         top.addWidget(self.url_input)
         top.addWidget(self.load_btn)
         top.addWidget(self.mode_btn)
         top.addWidget(self.login_btn)
-        top.addWidget(self.user_info_btn)
-        root.addLayout(top)
+        root.addWidget(toolbar)
 
         self.outer_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.outer_splitter.setChildrenCollapsible(False)
@@ -677,7 +644,7 @@ class MainWindow(QMainWindow):
         self.outer_splitter.setStretchFactor(1, 6)
         self.content_splitter.setStretchFactor(0, 5)
         self.content_splitter.setStretchFactor(1, 2)
-        root.addWidget(self.outer_splitter)
+        root.addWidget(self.outer_splitter, stretch=1)
         self.outer_splitter.setSizes([250, 1470])
         self.content_splitter.setSizes([1110, 360])
 
@@ -697,28 +664,6 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-
-        header = QWidget()
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(4, 0, 4, 0)
-        header_layout.setSpacing(8)
-        self.single_room_label = QLabel('No room loaded')
-        self.single_room_label.setFont(QFont('Menlo', 10))
-        self.single_record_indicator = QLabel()
-        self.single_record_indicator.setFixedSize(10, 10)
-        self.single_shot_btn = QPushButton('Shot')
-        self.single_shot_btn.setFixedWidth(72)
-        self.single_shot_btn.setEnabled(False)
-        self.single_shot_btn.clicked.connect(self._take_single_screenshot)
-        self.single_record_btn = QPushButton('Start REC')
-        self.single_record_btn.setFixedWidth(96)
-        self.single_record_btn.setEnabled(False)
-        self.single_record_btn.clicked.connect(self._toggle_single_recording)
-        header_layout.addWidget(self.single_room_label, stretch=1)
-        header_layout.addWidget(self.single_shot_btn)
-        header_layout.addWidget(self.single_record_indicator)
-        header_layout.addWidget(self.single_record_btn)
-        layout.addWidget(header)
 
         self.video_widget = QVideoWidget()
         self.video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -754,18 +699,33 @@ class MainWindow(QMainWindow):
         self.volume_slider.valueChanged.connect(self._on_volume_changed)
 
         self.stream_combo = QComboBox()
-        self.stream_combo.setMinimumWidth(240)
+        self.stream_combo.setMinimumWidth(90)
+        self.stream_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.stream_combo.currentIndexChanged.connect(self._on_stream_changed)
 
+        self.single_room_label = QLabel('No room loaded')
+        self.single_room_label.setStyleSheet('font-weight: 600;')
+        self.single_room_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.single_record_indicator = QLabel()
+        self.single_record_indicator.setFixedSize(10, 10)
+        self.single_shot_btn = QPushButton('Shot')
+        self.single_shot_btn.setFixedWidth(72)
+        self.single_shot_btn.setEnabled(False)
+        self.single_shot_btn.clicked.connect(self._take_single_screenshot)
+        self.single_record_btn = QPushButton('Start REC')
+        self.single_record_btn.setFixedWidth(96)
+        self.single_record_btn.setEnabled(False)
+        self.single_record_btn.clicked.connect(self._toggle_single_recording)
         layout.addWidget(self.play_btn)
         layout.addWidget(self.stop_btn)
-        layout.addWidget(QLabel('|'))
         layout.addWidget(self.mute_btn)
         layout.addWidget(self.volume_slider)
-        layout.addWidget(QLabel('|'))
-        layout.addWidget(QLabel('Quality:'))
+        self.stream_combo.setAccessibleName('Stream quality')
         layout.addWidget(self.stream_combo)
-        layout.addStretch()
+        layout.addWidget(self.single_room_label, stretch=1)
+        layout.addWidget(self.single_shot_btn)
+        layout.addWidget(self.single_record_indicator)
+        layout.addWidget(self.single_record_btn)
         return bar
 
     def _build_multi_page(self):
@@ -789,11 +749,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(toolbar)
 
         self.multi_grid_host = QWidget()
-        self.multi_grid_host.installEventFilter(self)
         self.multi_grid = QGridLayout(self.multi_grid_host)
         self.multi_grid.setContentsMargins(0, 0, 0, 0)
-        self.multi_grid.setHorizontalSpacing(10)
-        self.multi_grid.setVerticalSpacing(10)
+        self.multi_grid.setHorizontalSpacing(8)
+        self.multi_grid.setVerticalSpacing(8)
         layout.addWidget(self.multi_grid_host, stretch=1)
 
         self._multi_tiles = [MultiRoomTile(index) for index in range(9)]
@@ -824,28 +783,36 @@ class MainWindow(QMainWindow):
         self.comment_view.setFont(QFont('Menlo', 10))
         layout.addWidget(self.comment_view, stretch=1)
 
-        meta_row = QHBoxLayout()
-        meta_row.setContentsMargins(0, 0, 0, 0)
-        meta_row.setSpacing(8)
-        self.identity_label = QLabel()
-        self.identity_label.setFont(QFont('Menlo', 10))
-        self.identity_label.setWordWrap(True)
-        self.identity_label.setMinimumHeight(28)
-        self.identity_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-        meta_row.addWidget(self.identity_label)
-        meta_row.addStretch()
-        self.send_btn = QPushButton('Send')
-        self.send_btn.setFixedSize(56, 38)
-        self.send_btn.clicked.connect(self._post_comment)
-        meta_row.addWidget(self.send_btn)
-        layout.addLayout(meta_row)
+        self.jump_to_latest = QPushButton('Jump to Latest')
+        self.jump_to_latest.clicked.connect(self._scroll_chat_to_bottom)
+        self.jump_to_latest.hide()
+        layout.addWidget(self.jump_to_latest)
+        self.comment_view.verticalScrollBar().valueChanged.connect(self._on_chat_scrolled)
 
+        self.identity_label = QLabel()
+        self.identity_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.identity_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        layout.addWidget(self.identity_label)
+
+        composer = QHBoxLayout()
         self.comment_input = QTextEdit()
         self.comment_input.setAcceptRichText(False)
-        self.comment_input.setFont(QFont('Menlo', 10))
-        self.comment_input.setFixedHeight(92)
+        self.comment_input.setFixedHeight(58)
         self.comment_input.installEventFilter(self)
-        layout.addWidget(self.comment_input)
+        self.comment_input.textChanged.connect(self._update_comment_input_state)
+        composer.addWidget(self.comment_input, stretch=1)
+        self.send_btn = QPushButton('Send')
+        self.send_btn.clicked.connect(self._post_comment)
+        composer.addWidget(self.send_btn)
+        layout.addLayout(composer)
+        self.chat_feedback = QLabel()
+        self.chat_feedback.setTextFormat(Qt.TextFormat.PlainText)
+        self.chat_feedback.setWordWrap(True)
+        self.chat_feedback.hide()
+        layout.addWidget(self.chat_feedback)
+        self.chat_sign_in = QPushButton('Sign In to Comment')
+        self.chat_sign_in.clicked.connect(self._open_login)
+        layout.addWidget(self.chat_sign_in)
 
         return box
 
@@ -885,15 +852,10 @@ class MainWindow(QMainWindow):
     # ── Player ──────────────────────────────────────────────────────────────
 
     def _setup_player(self):
-        self.player = QMediaPlayer()
-        self.audio_output = QAudioOutput()
-        self.audio_output.setVolume(self.volume_slider.value() / 100)
-        self.player.setAudioOutput(self.audio_output)
-        self.player.setVideoOutput(self.video_widget)
-        self.player.playbackStateChanged.connect(self._on_playback_state_changed)
-        self.player.errorOccurred.connect(self._on_player_error)
-        self._connect_single_video_sink(self.video_widget)
-        self._single_recorder = StreamRecorder(self)
+        self.playback = PlaybackSession(self.video_widget, self.volume_slider.value() / 100, self)
+        self.playback.state_changed.connect(self._on_playback_state_changed)
+        self.playback.error_occurred.connect(self._on_player_error)
+        self._single_recorder = self.playback.recorder
         self._single_recorder.state_changed.connect(self._update_single_record_ui)
         self._single_recorder.started.connect(self._on_single_recording_started)
         self._single_recorder.stopped.connect(self._on_single_recording_stopped)
@@ -904,26 +866,18 @@ class MainWindow(QMainWindow):
         self._select_multi_tile(0, sync_comments=False)
 
     def _toggle_play(self):
-        state = self.player.playbackState()
-        if state == QMediaPlayer.PlaybackState.PlayingState:
-            self.player.pause()
-        elif state == QMediaPlayer.PlaybackState.PausedState:
-            self.player.play()
-        else:
-            self._play_current()
+        self.playback.toggle(self._play_current)
 
     def _play_current(self):
         idx = self.stream_combo.currentIndex()
         if idx < 0 or idx >= len(self._streams):
             return
         label, url = self._streams[idx]
-        self.player.setSource(QUrl(url))
-        self.player.play()
+        self.playback.play(url)
         self.status_bar.showMessage(f'Now playing: {label}')
 
     def _stop_player(self):
-        self.player.stop()
-        self.player.setSource(QUrl())
+        self.playback.stop(clear_source=True)
 
     def _on_playback_state_changed(self, state):
         playing = state == QMediaPlayer.PlaybackState.PlayingState
@@ -937,28 +891,11 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f'Playback error: {error_string}')
 
     def _on_mute_toggled(self, muted):
-        self.audio_output.setMuted(muted)
+        self.playback.set_muted(muted)
         self.mute_btn.setText('🔇' if muted else '🔊')
 
     def _on_volume_changed(self, value):
-        self.audio_output.setVolume(value / 100)
-
-    def _connect_single_video_sink(self, video_widget):
-        video_sink_getter = getattr(video_widget, 'videoSink', None)
-        if not callable(video_sink_getter):
-            return
-        video_sink = video_sink_getter()
-        if video_sink is None:
-            return
-        video_sink.videoFrameChanged.connect(self._on_single_video_frame_changed)
-
-    def _on_single_video_frame_changed(self, frame):
-        if not frame.isValid():
-            return
-        image = frame.toImage()
-        if image.isNull():
-            return
-        self._single_latest_frame_image = image.copy()
+        self.playback.set_volume(value / 100)
 
     def _capture_screenshot(self, image, room_name, label):
         if image is None or image.isNull():
@@ -978,7 +915,7 @@ class MainWindow(QMainWindow):
         if not self._streams:
             self.status_bar.showMessage('No stream available to capture.')
             return
-        self._capture_screenshot(self._single_latest_frame_image.copy(), self._single_room_name, 'Single view')
+        self._capture_screenshot(self.playback.screenshot(), self._single_room_name, 'Single view')
 
     def _take_multi_screenshot(self, tile_index):
         tile = self._multi_tiles[tile_index]
@@ -1074,7 +1011,7 @@ class MainWindow(QMainWindow):
             self.play_btn.setEnabled(False)
             return
         self.play_btn.setEnabled(True)
-        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+        if self.playback.state == QMediaPlayer.PlaybackState.PlayingState:
             self._play_current()
 
     def load_room(self):
@@ -1087,26 +1024,44 @@ class MainWindow(QMainWindow):
             self._load_single_room(room_input)
 
     def _load_single_room(self, room_input):
-        self._stop_single_recording(silent=True)
-        self._stop_player()
+        for thread in self._single_load_threads.values():
+            thread.requestInterruption()
+        request = self.playback.reset_room()
         self.stream_combo.clear()
         self._streams = []
         self._single_room_name = ''
         self._single_room_id = 0
         self._single_live_id = 0
-        self._single_latest_frame_image = QImage()
         self.single_room_label.setText('Loading room...')
+        self.single_room_label.setToolTip('')
         self.play_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
         self.load_btn.setEnabled(False)
         self.status_bar.showMessage('Opening room...')
 
-        self._load_room_thread = LoadRoomThread(room_input)
-        self._load_room_thread.status.connect(self.status_bar.showMessage)
-        self._load_room_thread.streams_ready.connect(self._on_single_streams_ready)
-        self._load_room_thread.error.connect(self._on_room_load_error)
-        self._load_room_thread.finished.connect(lambda: self.load_btn.setEnabled(True))
-        self._load_room_thread.start()
+        thread = LoadRoomThread(room_input)
+        self._single_load_threads[request] = thread
+        thread.status.connect(
+            lambda message: self._handle_single_load(request, self.status_bar.showMessage, message)
+        )
+        thread.streams_ready.connect(
+            lambda *result: self._handle_single_load(request, self._on_single_streams_ready, *result)
+        )
+        thread.error.connect(
+            lambda message: self._handle_single_load(request, self._on_room_load_error, message)
+        )
+        thread.finished.connect(
+            lambda: self._on_single_load_finished(request)
+        )
+        thread.start()
+
+    def _on_single_load_finished(self, request):
+        self._single_load_threads.pop(request, None)
+        self._handle_single_load(request, self.load_btn.setEnabled, True)
+
+    def _handle_single_load(self, request, callback, *args):
+        if self.playback.is_current_request(request):
+            callback(*args)
 
     def _on_single_streams_ready(self, streams, room_name, room_id, live_id):
         self._streams = streams
@@ -1114,6 +1069,7 @@ class MainWindow(QMainWindow):
         self._single_room_id = room_id
         self._single_live_id = live_id
         self.single_room_label.setText(room_name)
+        self.single_room_label.setToolTip(room_name)
 
         self.stream_combo.blockSignals(True)
         self.stream_combo.clear()
@@ -1133,8 +1089,8 @@ class MainWindow(QMainWindow):
             self._set_comment_room(room_id, live_id, room_name, mode='single')
 
     def _on_room_load_error(self, msg):
-        self._single_latest_frame_image = QImage()
         self.single_room_label.setText('No room loaded')
+        self.single_room_label.setToolTip('')
         self._update_single_record_ui()
         self.status_bar.showMessage(f'Error: {msg}')
 
@@ -1146,7 +1102,6 @@ class MainWindow(QMainWindow):
         if is_multi:
             self._stop_single_recording(silent=True)
             self._stop_player()
-            self._update_multi_tile_sizes()
             for tile in self._visible_multi_tiles():
                 tile.resume_loaded()
         else:
@@ -1188,8 +1143,8 @@ class MainWindow(QMainWindow):
                 self.multi_grid.addWidget(tile, row, col)
                 tile.show()
             else:
-                if tile.is_loaded():
-                    tile.clear_tile()
+                self._interrupt_tile_loads(tile.index)
+                tile.clear_tile()
                 tile.hide()
 
         for row in range(3):
@@ -1200,35 +1155,12 @@ class MainWindow(QMainWindow):
         if self._selected_multi_tile_index >= visible_count:
             self._selected_multi_tile_index = 0
         self._select_multi_tile(self._selected_multi_tile_index, sync_comments=False)
-        self._update_multi_tile_sizes()
         if self._mode == 'multi':
             self._refresh_comment_targets(preferred_tile_index=self._selected_multi_tile_index)
 
     def _visible_multi_tiles(self):
         visible_count = len(self.MULTI_LAYOUTS[self.multi_layout_combo.currentText()]['positions'])
         return self._multi_tiles[:visible_count]
-
-    def _update_multi_tile_sizes(self):
-        info = self.MULTI_LAYOUTS[self.multi_layout_combo.currentText()]
-        rows = info['rows']
-        cols = info['cols']
-        if rows <= 0 or cols <= 0:
-            return
-
-        spacing_x = self.multi_grid.horizontalSpacing()
-        spacing_y = self.multi_grid.verticalSpacing()
-        rect = self.multi_grid_host.contentsRect()
-        available_width = max(0, rect.width() - spacing_x * (cols - 1))
-        available_height = max(0, rect.height() - spacing_y * (rows - 1))
-        tile_height = max(120, available_height // rows if rows else rect.height())
-
-        for tile in self._multi_tiles:
-            if tile.isVisible():
-                tile.setMinimumWidth(0)
-                tile.setFixedHeight(tile_height)
-            else:
-                tile.setMinimumWidth(0)
-                tile.setMaximumHeight(16777215)
 
     def _select_multi_tile(self, index, sync_comments=True):
         self._selected_multi_tile_index = index
@@ -1272,6 +1204,7 @@ class MainWindow(QMainWindow):
         if tile is None:
             return
         self._select_multi_tile(tile.index, sync_comments=False)
+        self._interrupt_tile_loads(tile.index)
         token = tile.start_loading(room_input)
         self.status_bar.showMessage(f'Opening room for tile {tile.index + 1}...')
 
@@ -1286,16 +1219,21 @@ class MainWindow(QMainWindow):
         thread.finished.connect(lambda t=tile, s=token: self._on_multi_thread_finished(t, s))
         thread.start()
 
+    def _interrupt_tile_loads(self, tile_index):
+        for (index, _), thread in self._multi_load_threads.items():
+            if index == tile_index:
+                thread.requestInterruption()
+
     def _on_multi_tile_selected(self, index):
         self._select_multi_tile(index, sync_comments=True)
 
     def _on_multi_tile_status(self, tile, token, message):
-        if tile.request_serial != token:
+        if not tile.playback.is_current_request(token):
             return
         tile.set_loading_status(message)
 
     def _on_multi_tile_ready(self, tile, token, streams, room_name, room_id, live_id, room_key):
-        if tile.request_serial != token:
+        if not tile.playback.is_current_request(token):
             return
         tile.set_room(streams, room_name, room_id, live_id, room_key)
         self.status_bar.showMessage(f'Loaded "{room_name}" into tile {tile.index + 1}')
@@ -1304,7 +1242,7 @@ class MainWindow(QMainWindow):
             self._set_comment_target_combo_index(tile.index)
 
     def _on_multi_tile_error(self, tile, token, message):
-        if tile.request_serial != token:
+        if not tile.playback.is_current_request(token):
             return
         tile.set_error(message)
         self.status_bar.showMessage(f'Tile {tile.index + 1} error: {message}')
@@ -1316,20 +1254,26 @@ class MainWindow(QMainWindow):
     # ── Login ────────────────────────────────────────────────────────────────
 
     def _on_auth_button_clicked(self):
-        if self._logged_in:
-            self._logout()
-            return
-        self._open_login()
+        if not self._logged_in:
+            self._open_login()
 
     def _update_auth_button(self, loading=False):
         if loading:
             self.login_btn.setText('Loading...')
             self.login_btn.setEnabled(False)
+            self.chat_sign_in.setEnabled(False)
             return
-        self.login_btn.setText('Sign Out' if self._logged_in else 'Sign In')
+        name = str(self._current_user_name or 'Account')
+        caption = name[:14] + '…' if len(name) > 15 else name
+        self.login_btn.setMenu(self.account_menu if self._logged_in else None)
+        self.login_btn.setText(caption if self._logged_in else 'Sign In')
+        self.login_btn.setToolTip(name if self._logged_in else '')
         self.login_btn.setEnabled(True)
+        self.chat_sign_in.setEnabled(True)
 
     def _open_login(self):
+        if self._closing or not self.login_btn.isEnabled():
+            return
         dlg = LoginDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._logged_in = True
@@ -1366,7 +1310,6 @@ class MainWindow(QMainWindow):
             self._current_user_name = ''
             self.status_bar.showMessage('Signed in.')
         self._update_auth_button()
-        self.user_info_btn.setEnabled(self._logged_in)
         self._update_identity_label()
         self._update_comment_input_state()
 
@@ -1376,7 +1319,6 @@ class MainWindow(QMainWindow):
             self._rooms_source = 'followed'
             self._current_user_info = dict(user_info)
             self._current_user_name = self._display_name_from_user_info(user_info)
-            self.user_info_btn.setEnabled(True)
             save_session_cookies()
             self.status_bar.showMessage(f'Signed in as {self._current_user_name or "Account"}')
             self._refresh_rooms()
@@ -1385,7 +1327,6 @@ class MainWindow(QMainWindow):
             self._rooms_source = 'all'
             self._current_user_name = ''
             self._current_user_info = {}
-            self.user_info_btn.setEnabled(False)
             clear_session_cookies()
             self.status_bar.showMessage('Saved session expired. Please sign in again.')
             self._refresh_rooms()
@@ -1400,9 +1341,11 @@ class MainWindow(QMainWindow):
         self._rooms_source = 'all'
         self._current_user_name = ''
         self._current_user_info = {}
+        self.chat_feedback.hide()
+        self._comment_target_version += 1
+        self.comment_input.clear()
         self._update_auth_button()
         self._update_room_source_buttons()
-        self.user_info_btn.setEnabled(False)
         self._update_identity_label()
         self._update_comment_input_state()
         self.status_bar.showMessage('Signed out.')
@@ -1414,7 +1357,6 @@ class MainWindow(QMainWindow):
         self._logged_in = False
         self._update_auth_button(loading=True)
         self._update_room_source_buttons()
-        self.user_info_btn.setEnabled(False)
         self._update_identity_label(loading=True)
         self.status_bar.showMessage('Restoring saved sign-in...')
         self._current_user_thread = LoadCurrentUserThread()
@@ -1425,15 +1367,42 @@ class MainWindow(QMainWindow):
         if not self._logged_in:
             self.status_bar.showMessage('Sign in to view account details.')
             return
-        if not self._current_user_info:
-            self.status_bar.showMessage('Account details are still loading. Please try again.')
-            return
         dlg = UserInfoDialog(self._current_user_info, self)
+        dlg.refresh_requested.connect(lambda: self._refresh_profile(dlg))
+        dlg.sign_out_requested.connect(dlg.accept)
+        dlg.sign_out_requested.connect(self._logout)
         dlg.exec()
+        dlg.deleteLater()
+
+    def _refresh_profile(self, dialog):
+        active = getattr(self, '_current_user_thread', None)
+        if self._closing or not self._logged_in or (active is not None and active.isRunning()):
+            return
+        dialog.set_refresh_state(loading=True)
+        thread = LoadCurrentUserThread()
+        self._current_user_thread = thread
+        thread.done.connect(self._on_profile_refreshed)
+        thread.done.connect(dialog.apply_refresh_result)
+        thread.start()
+
+    def _on_profile_refreshed(self, data, ok):
+        if ok and self._logged_in and not self._closing:
+            self._current_user_info = dict(data)
+            self._current_user_name = self._display_name_from_user_info(data)
+            self._update_auth_button()
+            self._update_identity_label()
 
     # ── Comments ─────────────────────────────────────────────────────────────
 
     def _set_comment_room(self, room_id, live_id, room_name, mode):
+        if mode == 'single':
+            self._active_comment_tile_index = None
+        if (room_id or 0, live_id or 0) == (self._comment_room_id, self._comment_live_id):
+            self._update_comment_input_state()
+            return
+        self.chat_feedback.hide()
+        self._comment_target_version += 1
+        self.comment_input.clear()
         self._comment_room_id = room_id or 0
         self._comment_live_id = live_id or 0
         self.comment_box.setTitle(f'Live Chat - {room_name}' if room_name else 'Live Chat')
@@ -1442,9 +1411,6 @@ class MainWindow(QMainWindow):
         if room_id:
             self._start_comments(room_id)
         self._update_comment_input_state()
-
-        if mode == 'single':
-            self._active_comment_tile_index = None
 
     def _refresh_comment_targets(self, preferred_tile_index=None):
         if self._mode != 'multi':
@@ -1458,6 +1424,7 @@ class MainWindow(QMainWindow):
         for tile in self._visible_multi_tiles():
             if tile.is_loaded():
                 self.comment_target_combo.addItem(tile.room_name, tile.index)
+        self.comment_target_combo.setCurrentIndex(-1)
         self.comment_target_combo.blockSignals(False)
         self.comment_target_combo.setEnabled(self.comment_target_combo.count() > 0)
 
@@ -1485,35 +1452,60 @@ class MainWindow(QMainWindow):
 
     def _post_comment(self):
         text = self.comment_input.toPlainText().strip()
-        if not text or not self._comment_live_id:
+        if (not text or not self._logged_in or not self._comment_live_id
+                or self._post_thread is not None or self._closing):
             return
         self.send_btn.setEnabled(False)
         self.comment_input.setEnabled(False)
         thread = SendCommentThread(self._comment_live_id, text)
-        thread.success.connect(self._on_comment_sent)
-        thread.error.connect(lambda msg: self.status_bar.showMessage(f'Chat error: {msg}'))
-        thread.finished.connect(self._update_comment_input_state)
-        thread.finished.connect(self.comment_input.setFocus)
-        thread.start()
+        target = self._comment_target_version
+        thread.success.connect(lambda: self._on_comment_sent(target))
+        self.chat_feedback.hide()
+        thread.error.connect(lambda msg: self._on_comment_failed(target, msg))
+        thread.finished.connect(self._on_post_finished)
         self._post_thread = thread
+        self._update_comment_input_state()
+        thread.start()
 
-    def _on_comment_sent(self):
-        self.comment_input.clear()
+    def _on_comment_failed(self, target, message):
+        if target == self._comment_target_version and not self._closing:
+            self.chat_feedback.setText(f'Could not send. {message}')
+            self.chat_feedback.show()
+
+    def _on_post_finished(self):
+        self._post_thread = None
+        self._update_comment_input_state()
+
+    def _on_comment_sent(self, target):
+        if target == self._comment_target_version:
+            self.comment_input.clear()
         self.status_bar.showMessage('Message sent.')
 
     def _start_comments(self, room_id):
-        self._live_comments_thread = LiveCommentsThread(room_id)
-        self._live_comments_thread.new_comments.connect(self._on_new_comments)
-        self._live_comments_thread.error.connect(
-            lambda msg: self._append_system_message(f'error: {msg}')
+        if self._closing:
+            return
+        thread = LiveCommentsThread(room_id)
+        self._live_comments_thread = thread
+        self._comment_threads.add(thread)
+        thread.new_comments.connect(
+            lambda comments: self._handle_comment_result(thread, self._on_new_comments, comments)
         )
-        self._live_comments_thread.start()
+        thread.error.connect(
+            lambda msg: self._handle_comment_result(thread, self._append_system_message, f'error: {msg}')
+        )
+        thread.finished.connect(lambda: self._comment_threads.discard(thread))
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _handle_comment_result(self, thread, callback, result):
+        if thread is self._live_comments_thread and not self._closing:
+            callback(result)
 
     def _stop_comments(self):
-        if self._live_comments_thread is not None:
-            self._live_comments_thread.stop()
-            self._live_comments_thread.wait()
-            self._live_comments_thread = None
+        thread = self._live_comments_thread
+        self._live_comments_thread = None
+        if thread is not None:
+            thread.stop()
 
     def _on_new_comments(self, comments):
         for comment in comments:
@@ -1577,6 +1569,13 @@ class MainWindow(QMainWindow):
             ' padding: 0 6px;'
             '}'
         )
+        self.centralWidget().setStyleSheet(
+            'QWidget#roomToolbar {'
+            f' background: {self._color_to_css(panel_bg)};'
+            f' border: 1px solid {soft_border};'
+            ' border-radius: 12px;'
+            '}'
+        )
         self.rooms_box.setStyleSheet(group_box_style)
         self.comment_box.setStyleSheet(group_box_style)
 
@@ -1622,6 +1621,14 @@ class MainWindow(QMainWindow):
             f' background: {self._color_to_css(self._mix_colors(button_hover, highlight, 0.22))};'
             f' border: 1px solid {self._color_to_css(self._mix_colors(border, highlight, 0.56))};'
             '}'
+            'QPushButton[primary="true"]:enabled {'
+            f' background: {self._color_to_css(highlight)};'
+            f' color: {self._color_to_css(selected_text)};'
+            ' font-weight: 600;'
+            '}'
+            'QPushButton[primary="true"]:hover:enabled {'
+            f' background: {self._color_to_css(self._mix_colors(highlight, base, 0.12))};'
+            '}'
             'QPushButton:disabled {'
             f' color: {self._color_to_rgba(text, 110)};'
             f' background: {self._color_to_rgba(surface_bg, 180)};'
@@ -1631,7 +1638,6 @@ class MainWindow(QMainWindow):
             self.load_btn,
             self.mode_btn,
             self.login_btn,
-            self.user_info_btn,
             self.refresh_btn,
             self.rooms_all_btn,
             self.rooms_followed_btn,
@@ -1641,8 +1647,14 @@ class MainWindow(QMainWindow):
             self.single_shot_btn,
             self.single_record_btn,
             self.send_btn,
+            self.chat_sign_in,
+            self.jump_to_latest,
         ):
             button.setStyleSheet(button_style)
+
+        for button in (self.load_btn, self.mode_btn, self.login_btn):
+            button.setStyleSheet(button_style.replace('padding: 8px 12px;', 'padding: 4px 8px;'))
+        self.url_input.setStyleSheet(control_style.replace('padding: 8px 12px;', 'padding: 4px 8px;'))
 
         self.comment_view.setStyleSheet(
             'QTextEdit {'
@@ -1669,7 +1681,7 @@ class MainWindow(QMainWindow):
         self.identity_label.setStyleSheet(f'color: {label_color};')
         self.comment_target_label.setStyleSheet(f'color: {label_color};')
         self.multi_hint_label.setStyleSheet(f'color: {label_color};')
-        self.single_room_label.setStyleSheet(f'color: {self._color_to_css(text)};')
+
 
         self.rooms_list.setStyleSheet(
             'QListWidget {'
@@ -1680,7 +1692,7 @@ class MainWindow(QMainWindow):
             ' outline: 0;'
             '}'
             'QListWidget::item {'
-            f' border-bottom: 1px dashed {subtle_border};'
+            f' border-bottom: 1px solid {subtle_border};'
             ' padding: 11px 10px;'
             f' background: {self._color_to_css(base)};'
             '}'
@@ -1734,19 +1746,43 @@ class MainWindow(QMainWindow):
     def _clear_comment_entries(self):
         self._comment_entries.clear()
         self.comment_view.clear()
+        self._scroll_chat_to_bottom()
 
     def _append_entry(self, entry):
         self._comment_entries.append(entry)
-        if len(self._comment_entries) > self.MAX_COMMENT_ENTRIES:
-            self._comment_entries = self._comment_entries[-self.MAX_COMMENT_ENTRIES:]
+        if (len(self._comment_entries) > self.MAX_COMMENT_ENTRIES + self.COMMENT_PRUNE_BATCH
+                and (not self.jump_to_latest.isVisible() or len(self._comment_entries) > 480)):
+            del self._comment_entries[:-self.MAX_COMMENT_ENTRIES]
             self._rerender_comment_entries()
             return
         self._render_entry(entry)
 
     def _rerender_comment_entries(self):
-        self.comment_view.clear()
-        for entry in self._comment_entries:
-            self._render_entry(entry)
+        scroll = self.comment_view.verticalScrollBar()
+        position = scroll.value()
+        follow = scroll.maximum() - position <= 4
+        self._rendering_chat = True
+        try:
+            self.comment_view.clear()
+            for entry in self._comment_entries:
+                self._render_entry(entry)
+        finally:
+            self._rendering_chat = False
+        scroll.setValue(scroll.maximum() if follow else position)
+
+    def _on_chat_scrolled(self):
+        if self._rendering_chat:
+            return
+        scroll = self.comment_view.verticalScrollBar()
+        if scroll.maximum() - scroll.value() <= 4:
+            self._chat_has_updates = False
+        self.jump_to_latest.setVisible(self._chat_has_updates)
+
+    def _scroll_chat_to_bottom(self):
+        scroll = self.comment_view.verticalScrollBar()
+        self._chat_has_updates = False
+        self.jump_to_latest.hide()
+        scroll.setValue(scroll.maximum())
 
     def _render_entry(self, entry):
         if entry['kind'] == 'comment':
@@ -1755,13 +1791,19 @@ class MainWindow(QMainWindow):
         self._render_system_message(entry['text'])
 
     def _append_rich_block(self, html):
+        scroll = self.comment_view.verticalScrollBar()
+        follow = scroll.maximum() - scroll.value() <= 4
         cursor = self.comment_view.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         cursor.insertHtml(html)
         cursor.insertBlock()
-        self.comment_view.setTextCursor(cursor)
-        sb = self.comment_view.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        if self._rendering_chat:
+            return
+        if follow:
+            self._scroll_chat_to_bottom()
+        else:
+            self._chat_has_updates = True
+            self.jump_to_latest.show()
 
     def _append_comment(self, name, text, comment):
         self._append_entry({
@@ -1831,7 +1873,8 @@ class MainWindow(QMainWindow):
 
     def _update_identity_label(self, loading=False):
         if loading:
-            self.identity_label.setText('User: loading...')
+            self.identity_label.show()
+            self.identity_label.setText('Loading account…')
             return
         if self._logged_in:
             display_name = (
@@ -1840,20 +1883,25 @@ class MainWindow(QMainWindow):
                 or self._current_user_name
                 or '...'
             )
-            self.identity_label.setText(f'User: {display_name}')
+            self.identity_label.show()
+            self.identity_label.setText(f'Commenting as {display_name}')
             return
-        self.identity_label.setText('User: not signed in')
+        self.identity_label.clear()
+        self.identity_label.hide()
 
     def _update_comment_input_state(self):
-        can_post = self._logged_in and bool(self._comment_live_id)
-        self.comment_input.setEnabled(can_post)
-        self.send_btn.setEnabled(can_post)
-        if not self._logged_in:
-            self.comment_input.setPlaceholderText('Sign in to join the chat...')
-        elif not self._comment_live_id:
-            self.comment_input.setPlaceholderText('Select a room to chat...')
-        else:
-            self.comment_input.setPlaceholderText('Type a message... (Cmd/Ctrl+Enter to send)')
+        can_post = self._logged_in and bool(self._comment_live_id) and not self._closing
+        pending = self._post_thread is not None
+        self.chat_sign_in.setVisible(not self._logged_in)
+        self.chat_sign_in.setEnabled(self.login_btn.isEnabled())
+        self.comment_input.setVisible(self._logged_in)
+        self.send_btn.setVisible(self._logged_in)
+        self.comment_input.setEnabled(can_post and not pending)
+        self.send_btn.setEnabled(can_post and not pending and bool(self.comment_input.toPlainText().strip()))
+        self.send_btn.setText('Sending…' if pending else 'Send')
+        self.comment_input.setPlaceholderText(
+            'Write a message · Ctrl/⌘ + Enter' if self._comment_live_id else 'Select a live room'
+        )
 
     # ── Rooms ────────────────────────────────────────────────────────────────
 
@@ -1980,12 +2028,7 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, event):
         try:
             event_type = event.type() if event is not None else None
-            multi_grid_host = getattr(self, 'multi_grid_host', None)
             comment_input = getattr(self, 'comment_input', None)
-
-            if multi_grid_host is not None and obj is multi_grid_host and event_type == QEvent.Type.Resize:
-                self._update_multi_tile_sizes()
-                return super().eventFilter(obj, event)
 
             if comment_input is not None and obj is comment_input and event_type == QEvent.Type.KeyPress:
                 if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -1998,27 +2041,32 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
-    @staticmethod
-    def _wait_for_thread(thread):
-        if thread is None:
-            return
-        if thread.isRunning():
-            thread.wait()
-
     def closeEvent(self, event):
-        self._stop_comments()
-        self._stop_single_recording(silent=True)
-        self._single_recorder.wait_for_stop()
-        self._wait_for_thread(getattr(self, '_load_room_thread', None))
-        self._wait_for_thread(getattr(self, '_live_rooms_thread', None))
-        self._wait_for_thread(getattr(self, '_current_user_thread', None))
-        self._wait_for_thread(getattr(self, '_post_thread', None))
-        self._wait_for_thread(getattr(self, '_update_check_thread', None))
-        for thread in list(self._multi_load_threads.values()):
-            self._wait_for_thread(thread)
-        self.player.stop()
-        for tile in self._multi_tiles:
-            tile.stop_recording(silent=True)
-            tile.wait_for_recording_stop()
-            tile.stop()
+        if not self._closing:
+            self._closing = True
+            self.setEnabled(False)
+            self.status_bar.showMessage('Closing. Waiting for background tasks…')
+            self._stop_comments()
+            for thread in (*self._single_load_threads.values(), *self._multi_load_threads.values()):
+                thread.requestInterruption()
+            self.playback.reset_room()
+            for tile in self._multi_tiles:
+                tile.playback.reset_room()
+
+        threads = (
+            self._live_rooms_thread,
+            getattr(self, '_current_user_thread', None),
+            getattr(self, '_post_thread', None),
+            self._update_check_thread,
+            *self._comment_threads,
+            *self._single_load_threads.values(),
+            *self._multi_load_threads.values(),
+        )
+        recorders = (self._single_recorder, *(tile.recorder for tile in self._multi_tiles))
+        if any(thread is not None and thread.isRunning() for thread in threads) or any(
+            recorder.is_recording() for recorder in recorders
+        ):
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
         event.accept()

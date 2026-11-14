@@ -7,15 +7,18 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QScrollArea,
+    QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QFont, QPixmap
+from PySide6.QtCore import Qt, QUrl, Signal, Slot
+from PySide6.QtGui import QFont, QGuiApplication, QPixmap
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
+from shiboken6 import isValid
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
-from .api import save_session_cookies, session, set_session_cookie
+from .api import save_session_cookies, set_session_cookie
 
 
 class LoginDialog(QDialog):
@@ -68,84 +71,63 @@ class LoginDialog(QDialog):
 
 
 class UserInfoDialog(QDialog):
+    refresh_requested = Signal()
+    sign_out_requested = Signal()
+
     def __init__(self, user_info, parent=None):
         super().__init__(parent)
-        self._user_info = dict(user_info)
-        self.setWindowTitle('Current User Info')
-        self.setMinimumSize(620, 500)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-
-        title = QLabel('Current account details')
-        title_font = QFont()
-        title_font.setPointSize(14)
-        title_font.setBold(True)
-        title.setFont(title_font)
-        layout.addWidget(title)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        layout.addWidget(scroll, stretch=1)
-
-        content = QWidget()
-        body = QVBoxLayout(content)
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(4)
-        scroll.setWidget(content)
-
-        body.addWidget(self._build_header_card())
-        body.addWidget(self._build_stat_cards())
-        for section in self._build_detail_sections():
-            body.addWidget(section)
-        body.addStretch()
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        buttons.accepted.connect(self.accept)
-        layout.addWidget(buttons)
-
-        self._apply_style()
-
-
-class UpdateDialog(QDialog):
-    def __init__(self, current_version, latest_version, release_url, parent=None):
-        super().__init__(parent)
-        self._release_url = str(release_url or '')
-        self.setWindowTitle('Update Available')
-        self.setMinimumWidth(420)
-
+        self.setWindowTitle('Profile')
+        self.resize(520, 440)
+        self._avatar_network = QNetworkAccessManager(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
-
-        title = QLabel('A new version is available.')
-        title_font = QFont()
-        title_font.setPointSize(14)
-        title_font.setBold(True)
-        title.setFont(title_font)
-        layout.addWidget(title)
-
-        details = QLabel(
-            f'Current version: {current_version}\n'
-            f'Latest version: {latest_version}\n'
-            f'Release page: {self._release_url}'
-        )
-        details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        details.setWordWrap(True)
-        layout.addWidget(details)
-
-        buttons = QDialogButtonBox(self)
-        self._open_button = buttons.addButton('Open Release Page', QDialogButtonBox.ButtonRole.AcceptRole)
-        buttons.addButton('Later', QDialogButtonBox.ButtonRole.RejectRole)
-        buttons.accepted.connect(self.accept)
+        self._status = QLabel()
+        self._status.setWordWrap(True)
+        self._status.hide()
+        layout.addWidget(self._status)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        layout.addWidget(self._scroll, stretch=1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        self._refresh = buttons.addButton('Refresh', QDialogButtonBox.ButtonRole.ActionRole)
+        sign_out = buttons.addButton('Sign Out', QDialogButtonBox.ButtonRole.ActionRole)
+        self._refresh.clicked.connect(self.refresh_requested)
+        sign_out.clicked.connect(self.sign_out_requested)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self.set_profile(user_info)
+        self._apply_style()
 
-    def should_open_release_page(self):
-        return self.result() == QDialog.DialogCode.Accepted and bool(self._release_url)
+    def set_profile(self, user_info):
+        self._user_info = dict(user_info)
+        content = QWidget()
+        body = QVBoxLayout(content)
+        body.setContentsMargins(0, 0, 0, 0)
+        if user_info:
+            body.addWidget(self._build_header_card())
+            body.addWidget(self._build_stat_cards())
+            for section in self._build_detail_sections():
+                body.addWidget(section)
+        else:
+            body.addWidget(QLabel('Profile unavailable. Select Refresh to try again.'))
+        body.addStretch()
+        self._scroll.setWidget(content)
+
+    def set_refresh_state(self, loading=False, message=''):
+        self._refresh.setEnabled(not loading)
+        self._refresh.setText('Refreshing…' if loading else 'Refresh')
+        self._status.setText(message)
+        self._status.setVisible(bool(message))
+
+    @Slot(dict, bool)
+    def apply_refresh_result(self, data, ok):
+        if ok:
+            self.set_profile(data)
+            self.set_refresh_state()
+        else:
+            self.set_refresh_state(message='Could not refresh the profile. Try again.')
 
     def _build_header_card(self):
         card = QFrame()
@@ -157,15 +139,12 @@ class UpdateDialog(QDialog):
         avatar = QLabel()
         avatar.setFixedSize(72, 72)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        avatar_pixmap = self._load_avatar_pixmap()
-        if avatar_pixmap.isNull():
-            avatar.setText(self._avatar_fallback_text())
-            fallback_font = QFont()
-            fallback_font.setPointSize(18)
-            fallback_font.setBold(True)
-            avatar.setFont(fallback_font)
-        else:
-            avatar.setPixmap(avatar_pixmap)
+        avatar.setText(self._avatar_fallback_text())
+        fallback_font = QFont()
+        fallback_font.setPointSize(18)
+        fallback_font.setBold(True)
+        avatar.setFont(fallback_font)
+        self._load_avatar(avatar)
         avatar.setObjectName('userInfoAvatar')
         layout.addWidget(avatar)
 
@@ -174,7 +153,8 @@ class UpdateDialog(QDialog):
         info_layout.setSpacing(2)
 
         display_name = self._user_info.get('user_name') or self._user_info.get('account_id') or 'Account'
-        name_label = QLabel(display_name)
+        name_label = QLabel(str(display_name))
+        name_label.setTextFormat(Qt.TextFormat.PlainText)
         name_font = QFont()
         name_font.setPointSize(13)
         name_font.setBold(True)
@@ -182,7 +162,13 @@ class UpdateDialog(QDialog):
         info_layout.addWidget(name_label)
 
         account_id = self._user_info.get('account_id') or 'Unknown'
-        info_layout.addWidget(QLabel(f'@{account_id}'))
+        handle = QLabel(f'@{account_id}')
+        handle.setTextFormat(Qt.TextFormat.PlainText)
+        info_layout.addWidget(handle)
+        copy_id = QPushButton('Copy ID')
+        identifier = self._user_info.get('account_id') or self._user_info.get('user_id')
+        copy_id.setEnabled(bool(identifier))
+        copy_id.clicked.connect(lambda: self._copy_id(identifier, copy_id))
 
         user_id = self._user_info.get('user_id')
         room_key = self._user_info.get('own_room_url_key') or '-'
@@ -198,6 +184,7 @@ class UpdateDialog(QDialog):
 
         info_layout.addStretch()
         layout.addLayout(info_layout, stretch=1)
+        layout.addWidget(copy_id, alignment=Qt.AlignmentFlag.AlignTop)
         return card
 
     def _build_stat_cards(self):
@@ -313,28 +300,40 @@ class UpdateDialog(QDialog):
 
     def _create_label_value_label(self, text, is_caption=False):
         label = QLabel(self._format_value(text))
+        label.setTextFormat(Qt.TextFormat.PlainText)
         label.setWordWrap(True)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         if is_caption:
             label.setObjectName('userInfoCaption')
         return label
 
-    def _load_avatar_pixmap(self):
-        image_url = self._user_info.get('image_url')
-        if image_url:
-            try:
-                response = session.get(image_url, timeout=10)
-                candidate = QPixmap()
-                if response.ok and candidate.loadFromData(response.content):
-                    return candidate.scaled(
-                        72,
-                        72,
-                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-            except Exception:
-                pass
-        return QPixmap()
+    @staticmethod
+    def _copy_id(identifier, button):
+        QGuiApplication.clipboard().setText(str(identifier))
+        button.setText('Copied')
+
+    def _load_avatar(self, avatar):
+        url = QUrl(str(self._user_info.get('image_url') or ''))
+        if url.scheme() != 'https' or not url.host():
+            return
+        request = QNetworkRequest(url)
+        request.setTransferTimeout(5000)
+        request.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute,
+                             QNetworkRequest.RedirectPolicy.SameOriginRedirectPolicy)
+        reply = self._avatar_network.get(request)
+
+        def update_avatar():
+            if not isValid(avatar):
+                return
+            pixmap = QPixmap()
+            if pixmap.loadFromData(reply.readAll().data()):
+                avatar.setPixmap(pixmap.scaled(
+                    72, 72, Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                ))
+
+        reply.finished.connect(update_avatar)
+        reply.finished.connect(reply.deleteLater)
 
     def _avatar_fallback_text(self):
         text = (
@@ -407,3 +406,41 @@ class UpdateDialog(QDialog):
             ' padding: 0 2px;'
             '}'
         )
+
+
+class UpdateDialog(QDialog):
+    def __init__(self, current_version, latest_version, release_url, parent=None):
+        super().__init__(parent)
+        self._release_url = str(release_url or '')
+        self.setWindowTitle('Update Available')
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        title = QLabel('A new version is available.')
+        title_font = QFont()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        layout.addWidget(title)
+
+        details = QLabel(
+            f'Current version: {current_version}\n'
+            f'Latest version: {latest_version}\n'
+            f'Release page: {self._release_url}'
+        )
+        details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        details.setWordWrap(True)
+        layout.addWidget(details)
+
+        buttons = QDialogButtonBox(self)
+        self._open_button = buttons.addButton('Open Release Page', QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton('Later', QDialogButtonBox.ButtonRole.RejectRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def should_open_release_page(self):
+        return self.result() == QDialog.DialogCode.Accepted and bool(self._release_url)

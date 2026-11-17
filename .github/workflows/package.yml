@@ -58,5 +58,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.release_path }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -186,7 +186,7 @@ class LoadCurrentUserThread(QThread):
     def run(self):
         try:
             data = fetch_current_user()
-            self.done.emit(data, bool(data.get('is_login')))
+            self.done.emit(data, data.get('is_login') in (True, 1, '1'))
         except Exception:
             self.done.emit({}, False)
 

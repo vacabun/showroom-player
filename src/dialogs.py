@@ -1,3 +1,8 @@
+import base64
+import json
+import os
+from pathlib import Path
+
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -8,11 +13,13 @@ from PySide6.QtWidgets import (
     QLabel,
     QScrollArea,
     QPushButton,
+    QLineEdit,
+    QFormLayout,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtCore import Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QTimer, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QFont, QGuiApplication, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from shiboken6 import isValid
@@ -34,22 +41,166 @@ class LoginDialog(QDialog):
         layout.setContentsMargins(0, 0, 0, 6)
         layout.setSpacing(4)
 
-        self._web = QWebEngineView()
-        layout.addWidget(self._web)
+        self._username = QLineEdit()
+        self._password = QLineEdit()
+        self._password.setEchoMode(QLineEdit.EchoMode.Password)
+        form = QFormLayout()
+        form.addRow('SHOWROOM ID', self._username)
+        form.addRow('Password', self._password)
+        self._captcha_image = QLabel()
+        self._captcha_answer = QLineEdit()
+        self._captcha_answer.setPlaceholderText('Enter the text in the image')
+        form.addRow(self._captcha_image)
+        form.addRow(self._captcha_answer)
+        self._captcha_image.hide()
+        self._captcha_answer.hide()
+        self._captcha_answer.returnPressed.connect(self._submit_credentials)
+        layout.addLayout(form)
+        self._sign_in = QPushButton('Sign In')
+        self._sign_in.setEnabled(False)
+        self._sign_in.clicked.connect(self._submit_credentials)
+        self._password.returnPressed.connect(self._submit_credentials)
+        layout.addWidget(self._sign_in)
+        web_login = QPushButton('Use Web Sign-In')
+        web_login.clicked.connect(self._show_web_login)
+        layout.addWidget(web_login)
+        self._hint = QLabel('Loading SHOWROOM sign-in…')
+        self._hint.setWordWrap(True)
+        layout.addWidget(self._hint)
 
-        hint = QLabel('Complete sign-in above. This window closes automatically after success.')
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setWordWrap(False)
-        hint.setFixedHeight(18)
-        hint.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        hint.setStyleSheet('color: gray; font-size: 11px;')
-        layout.addWidget(hint)
+        self._web = QWebEngineView()
+        self._web.hide()
+        layout.addWidget(self._web, stretch=1)
+        self._web.loadFinished.connect(self._on_login_page_loaded)
+        self._web.urlChanged.connect(self._on_url_changed)
+
+        self._captcha_timer = QTimer(self)
+        self._captcha_timer.setInterval(500)
+        self._captcha_timer.timeout.connect(self._check_captcha)
+        self._captcha_timer.start()
 
         store = self._web.page().profile().cookieStore()
         store.cookieAdded.connect(self._on_cookie_added)
 
         self._web.load(QUrl('https://www.showroom-live.com/account/login'))
-        self._web.urlChanged.connect(self._on_url_changed)
+
+    def _on_login_page_loaded(self, ok):
+        self._sign_in.setEnabled(ok and self._is_login_page())
+        if not ok:
+            self._hint.setText('Could not load SHOWROOM sign-in.')
+            self._show_web_login()
+        elif self._is_login_page():
+            self._hint.setText('Enter your SHOWROOM account details.')
+
+    def _is_login_page(self):
+        url = self._web.url()
+        return (
+            url.scheme() == 'https'
+            and url.host() == 'www.showroom-live.com'
+            and url.port(443) == 443
+            and url.path().rstrip('/') == '/account/login'
+        )
+
+    def _show_web_login(self):
+        self._password.clear()
+        self._captcha_image.hide()
+        self._captcha_answer.hide()
+        self._web.show()
+
+    def _check_captcha(self):
+        if not self.isVisible() or self._web.isVisible() or not self._is_login_page():
+            return
+        self._web.page().runJavaScript("""
+            (() => {
+                const fields = [...document.querySelectorAll('input')];
+                const answer = fields.find(input => input.getClientRects().length &&
+                    /captcha|words as they appear in the image/i.test(input.name + ' ' + input.placeholder));
+                if (!answer || !answer.form) return '';
+                const images = [...answer.form.querySelectorAll('img')];
+                const image = images.find(img => img.getClientRects().length &&
+                    /captcha/i.test(img.src + ' ' + img.alt + ' ' + img.id));
+                if (!image || !image.naturalWidth) return '';
+                const canvas = document.createElement('canvas');
+                canvas.width = image.naturalWidth;
+                canvas.height = image.naturalHeight;
+                try {
+                    canvas.getContext('2d').drawImage(image, 0, 0);
+                    return canvas.toDataURL('image/png').split(',')[1];
+                } catch {
+                    return '';
+                }
+            })()
+        """, self._update_captcha)
+
+    def _update_captcha(self, image_data):
+        if not self.isVisible() or self._web.isVisible():
+            return
+        image = QPixmap()
+        if image_data:
+            image.loadFromData(base64.b64decode(image_data))
+        if not image.isNull():
+            self._captcha_image.setPixmap(image)
+            self._sign_in.setEnabled(True)
+        elif not self._captcha_answer.isHidden():
+            self._captcha_answer.clear()
+        self._captcha_image.setVisible(not image.isNull())
+        self._captcha_answer.setVisible(not image.isNull())
+
+    def _submit_credentials(self):
+        if not self._sign_in.isEnabled() or not self._is_login_page():
+            return
+        username = self._username.text().strip()
+        password = self._password.text()
+        if not username or not password:
+            self._hint.setText('Enter your SHOWROOM ID and password.')
+            return
+        answer = self._captcha_answer.text().strip()
+        if not self._captcha_answer.isHidden() and not answer:
+            self._hint.setText('Enter the text shown in the verification image.')
+            return
+        credentials = json.dumps([username, password, answer])
+        self._password.clear()
+        self._sign_in.setEnabled(False)
+        self._hint.setText('Submitting to SHOWROOM…')
+        self._web.page().runJavaScript(r"""
+            (([username, password, answer]) => {
+                if (location.origin !== 'https://www.showroom-live.com' ||
+                    location.pathname.replace(/\/$/, '') !== '/account/login') return;
+                const passwords = [...document.querySelectorAll('input[type="password"]')]
+                    .filter(input => input.getClientRects().length && !input.disabled);
+                if (passwords.length !== 1) return;
+                const secret = passwords[0];
+                const form = secret.form;
+                if (!form || form.method !== 'post' ||
+                    new URL(form.action).origin !== location.origin) return;
+                const captcha = [...form.querySelectorAll('input')].find(input =>
+                    input.getClientRects().length &&
+                    /captcha|words as they appear in the image/i.test(input.name + ' ' + input.placeholder));
+                if (captcha && !answer) return true;
+                const fields = [...form.querySelectorAll('input')]
+                    .filter(input => input !== captcha && ['text', 'email', 'tel'].includes(input.type) &&
+                        input.getClientRects().length && !input.disabled);
+                if (fields.length !== 1) return;
+                const setValue = Object.getOwnPropertyDescriptor(
+                    HTMLInputElement.prototype, 'value').set;
+                const values = [[fields[0], username], [secret, password]];
+                if (captcha) values.push([captcha, answer]);
+                for (const [field, value] of values) {
+                    setValue.call(field, value);
+                    field.dispatchEvent(new Event('input', { bubbles: true }));
+                    field.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                const submit = form.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
+                if (!submit || submit.disabled) return false;
+                setTimeout(() => submit.click(), 0);
+                return true;
+            })(""" + credentials + ');', self._on_credentials_submitted)
+
+    def _on_credentials_submitted(self, submitted):
+        if submitted or not self.isVisible():
+            return
+        self._hint.setText('Could not submit automatically. Continue in the SHOWROOM page.')
+        self._show_web_login()
 
     def _on_cookie_added(self, cookie):
         name = bytes(cookie.name()).decode('utf-8', errors='replace')
@@ -57,10 +208,24 @@ class LoginDialog(QDialog):
         self._cookies[name] = (value, cookie.domain(), cookie.path())
 
     def _on_url_changed(self, url):
-        s = url.toString()
-        if ('showroom-live.com' in s
-                and '/account/login' not in s
-                and s != 'about:blank'):
+        host = url.host().lower()
+        if url.scheme() != 'https' or not (
+            host == 'showroom-live.com' or host.endswith('.showroom-live.com')
+        ):
+            return
+
+        trace_path = os.environ.get('SHOWROOM_LOGIN_TRACE')
+        path = url.path()
+        if trace_path:
+            # Keep only predefined route names. URLs can carry secrets in any component.
+            route = path if path in ('/account/login', '/', '/account') else '[other route]'
+            try:
+                with Path(trace_path).open('a', encoding='utf-8') as trace:
+                    trace.write(f'navigation {route}\n')
+            except OSError:
+                pass
+
+        if not path.startswith('/account/login'):
             self._sync_cookies()
             self.accept()
 

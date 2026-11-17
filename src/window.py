@@ -1327,8 +1327,13 @@ class MainWindow(QMainWindow):
             self._rooms_source = 'all'
             self._current_user_name = ''
             self._current_user_info = {}
-            clear_session_cookies()
-            self.status_bar.showMessage('Saved session expired. Please sign in again.')
+            if user_info.get('is_login') in (False, 0, '0'):
+                clear_session_cookies()
+                self.status_bar.showMessage('Saved session expired. Please sign in again.')
+            else:
+                self.status_bar.showMessage(
+                    'Could not verify saved sign-in. It will be retried on the next launch.'
+                )
             self._refresh_rooms()
         self._update_auth_button()
         self._update_room_source_buttons()

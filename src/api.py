@@ -1,6 +1,7 @@
 import time
 import json
 import re
+from tempfile import NamedTemporaryFile
 from pathlib import Path
 import requests
 import m3u8
@@ -38,10 +39,17 @@ def save_session_cookies():
             'secure': bool(cookie.secure),
             'expires': cookie.expires,
         })
-    COOKIE_CACHE_PATH.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding='utf-8',
-    )
+    temporary_path = None
+    try:
+        with NamedTemporaryFile(
+            mode='w', encoding='utf-8', dir=COOKIE_CACHE_PATH.parent, delete=False
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            json.dump(payload, temporary, ensure_ascii=False, indent=2)
+        temporary_path.replace(COOKIE_CACHE_PATH)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def load_session_cookies():
@@ -75,6 +83,7 @@ def clear_session_cookies():
 
 def fetch_current_user():
     resp = session.get('https://www.showroom-live.com/api/current_user', timeout=10)
+    resp.raise_for_status()
     data = resp.json()
     if not isinstance(data, dict):
         return {}

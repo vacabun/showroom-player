@@ -1,4 +1,5 @@
-import random
+from collections import OrderedDict
+from threading import Event
 import time
 from PySide6.QtCore import QThread, Signal
 
@@ -51,53 +52,73 @@ class LoadRoomThread(QThread):
 
 
 class LiveCommentsThread(QThread):
-    MIN_POLL_INTERVAL = 0.5
-    MAX_POLL_INTERVAL = 1.5
+    POLL_INTERVAL = 1
+    MAX_BACKOFF = 30
+    MAX_SEEN = 4096
 
     new_comments = Signal(list)
-    error = Signal(str)
+    reconnecting = Signal(bool)
 
     def __init__(self, room_id):
         super().__init__()
         self.room_id = room_id
-        self._running = True
-        self._seen_ids = set()
+        self._stopped = Event()
+        self._wake = Event()
+        self._seen = OrderedDict()
 
     @staticmethod
-    def _comment_id(c):
-        cid = c.get('id')
-        if cid is not None:
-            return cid
-        return f"{c.get('created_at')}_{c.get('name')}_{c.get('comment', '')[:32]}"
+    def _comment_id(comment):
+        if comment.get('id') is not None:
+            return ('id', str(comment['id']))
+        return ('fallback', str(comment.get('created_at')), str(comment.get('user_id')),
+                str(comment.get('name')), str(comment.get('comment')))
+
+    def _collect_new(self, comments):
+        new = []
+        for comment in sorted(comments, key=lambda item: int(item.get('created_at') or 0)):
+            key = self._comment_id(comment)
+            if key not in self._seen:
+                new.append(comment)
+            self._seen[key] = None
+            self._seen.move_to_end(key)
+        while len(self._seen) > self.MAX_SEEN:
+            self._seen.popitem(last=False)
+        return new
 
     def run(self):
-        while self._running:
+        failures = 0
+        while not self._stopped.is_set():
+            self._wake.clear()
+            started = time.monotonic()
             try:
                 response = session.get(
-                    f'https://www.showroom-live.com/api/live/comment_log?room_id={self.room_id}',
+                    'https://www.showroom-live.com/api/live/comment_log',
+                    params={'room_id': self.room_id},
                     timeout=10,
                 )
-                data = response.json()
-                comments = data.get('comment_log', [])
-                comments = sorted(comments, key=lambda c: c.get('created_at', 0))
-                new = [c for c in comments if self._comment_id(c) not in self._seen_ids]
-                if new:
-                    for c in new:
-                        self._seen_ids.add(self._comment_id(c))
+                response.raise_for_status()
+                comments = response.json()['comment_log']
+                new = self._collect_new(comments)
+                if failures:
+                    self.reconnecting.emit(False)
+                failures = 0
+                if new and not self._stopped.is_set():
                     self.new_comments.emit(new)
-            except Exception as e:
-                self.error.emit(str(e))
-            self._sleep_between_polls()
+                delay = max(0, self.POLL_INTERVAL - (time.monotonic() - started))
+            except (ValueError, TypeError, KeyError, AttributeError, OSError):
+                failures = min(failures + 1, 5)
+                if failures == 1:
+                    self.reconnecting.emit(True)
+                delay = min(2 ** failures, self.MAX_BACKOFF)
+            if not self._stopped.is_set():
+                self._wake.wait(delay)
 
-    def _sleep_between_polls(self):
-        remaining = random.uniform(self.MIN_POLL_INTERVAL, self.MAX_POLL_INTERVAL)
-        while self._running and remaining > 0:
-            step = min(0.1, remaining)
-            time.sleep(step)
-            remaining -= step
+    def refresh(self):
+        self._wake.set()
 
     def stop(self):
-        self._running = False
+        self._stopped.set()
+        self._wake.set()
 
 
 class LiveRoomsThread(QThread):

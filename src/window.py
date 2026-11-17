@@ -43,6 +43,11 @@ from .threads import (
 )
 
 
+def selected_stream(combo, streams):
+    index = combo.currentIndex()
+    return streams[index] if 0 <= index < len(streams) else None
+
+
 class MultiRoomTile(QWidget):
     selected = Signal(int)
     recording_notice = Signal(str)
@@ -130,6 +135,10 @@ class MultiRoomTile(QWidget):
         layout.addWidget(self.status_label)
 
         self.playback = PlaybackSession(self.video_widget, self.volume_slider.value() / 100, self)
+        self.playback.install_video_menu(
+            self.video_widget, lambda: self.room_key if self.room_id else '',
+            lambda: selected_stream(self.stream_combo, self.streams),
+        )
         self.playback.state_changed.connect(self._on_playback_state_changed)
         self.playback.error_occurred.connect(self._on_player_error)
         self.recorder = self.playback.recorder
@@ -513,6 +522,7 @@ class MainWindow(QMainWindow):
 
         self._mode = 'single'
         self._streams = []
+        self._single_room_key = ''
         self._single_room_name = ''
         self._single_room_id = 0
         self._single_live_id = 0
@@ -524,7 +534,7 @@ class MainWindow(QMainWindow):
         self._comment_live_id = 0
         self._comment_entries = []
         self._rendering_chat = False
-        self._chat_has_updates = False
+        self._chat_unread = 0
         self._comment_target_version = 0
         self._post_thread = None
         self._active_comment_tile_index = None
@@ -778,8 +788,13 @@ class MainWindow(QMainWindow):
         header.addWidget(self.comment_target_combo, stretch=1)
         layout.addLayout(header)
 
+        self.chat_connection = QLabel('Reconnecting…')
+        self.chat_connection.hide()
+        layout.addWidget(self.chat_connection)
         self.comment_view = QTextEdit()
         self.comment_view.setReadOnly(True)
+        self.comment_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.comment_view.customContextMenuRequested.connect(self._show_comment_menu)
         self.comment_view.setFont(QFont('Menlo', 10))
         layout.addWidget(self.comment_view, stretch=1)
 
@@ -853,6 +868,10 @@ class MainWindow(QMainWindow):
 
     def _setup_player(self):
         self.playback = PlaybackSession(self.video_widget, self.volume_slider.value() / 100, self)
+        self.playback.install_video_menu(
+            self.video_widget, lambda: self._single_room_key,
+            lambda: selected_stream(self.stream_combo, self._streams),
+        )
         self.playback.state_changed.connect(self._on_playback_state_changed)
         self.playback.error_occurred.connect(self._on_player_error)
         self._single_recorder = self.playback.recorder
@@ -1029,6 +1048,7 @@ class MainWindow(QMainWindow):
         request = self.playback.reset_room()
         self.stream_combo.clear()
         self._streams = []
+        self._single_room_key = ''
         self._single_room_name = ''
         self._single_room_id = 0
         self._single_live_id = 0
@@ -1045,7 +1065,7 @@ class MainWindow(QMainWindow):
             lambda message: self._handle_single_load(request, self.status_bar.showMessage, message)
         )
         thread.streams_ready.connect(
-            lambda *result: self._handle_single_load(request, self._on_single_streams_ready, *result)
+            lambda *result: self._handle_single_load(request, self._on_single_streams_ready, *result, room_input)
         )
         thread.error.connect(
             lambda message: self._handle_single_load(request, self._on_room_load_error, message)
@@ -1063,7 +1083,8 @@ class MainWindow(QMainWindow):
         if self.playback.is_current_request(request):
             callback(*args)
 
-    def _on_single_streams_ready(self, streams, room_name, room_id, live_id):
+    def _on_single_streams_ready(self, streams, room_name, room_id, live_id, room_key):
+        self._single_room_key = room_key
         self._streams = streams
         self._single_room_name = room_name
         self._single_room_id = room_id
@@ -1495,8 +1516,8 @@ class MainWindow(QMainWindow):
         thread.new_comments.connect(
             lambda comments: self._handle_comment_result(thread, self._on_new_comments, comments)
         )
-        thread.error.connect(
-            lambda msg: self._handle_comment_result(thread, self._append_system_message, f'error: {msg}')
+        thread.reconnecting.connect(
+            lambda active: self._handle_comment_result(thread, self.chat_connection.setVisible, active)
         )
         thread.finished.connect(lambda: self._comment_threads.discard(thread))
         thread.finished.connect(thread.deleteLater)
@@ -1506,17 +1527,32 @@ class MainWindow(QMainWindow):
         if thread is self._live_comments_thread and not self._closing:
             callback(result)
 
+    def _show_comment_menu(self, position):
+        menu = self.comment_view.createStandardContextMenu(position)
+        menu.addSeparator()
+        refresh = menu.addAction('Refresh Comments')
+        refresh.setEnabled(self._live_comments_thread is not None)
+        refresh.triggered.connect(self._refresh_comments)
+        menu.exec(self.comment_view.viewport().mapToGlobal(position))
+        menu.deleteLater()
+
+    def _refresh_comments(self):
+        if self._live_comments_thread is not None:
+            self._live_comments_thread.refresh()
+
     def _stop_comments(self):
+        self.chat_connection.hide()
         thread = self._live_comments_thread
         self._live_comments_thread = None
         if thread is not None:
             thread.stop()
 
     def _on_new_comments(self, comments):
-        for comment in comments:
-            name = comment.get('name', '?')
-            text = comment.get('comment', '')
-            self._append_comment(name, text, comment)
+        self._append_entries([
+            {'kind': 'comment', 'name': comment.get('name', '?'),
+             'text': comment.get('comment', ''), 'comment': dict(comment)}
+            for comment in comments
+        ], unread=len(comments))
 
     @staticmethod
     def _plain_to_html(text):
@@ -1754,13 +1790,31 @@ class MainWindow(QMainWindow):
         self._scroll_chat_to_bottom()
 
     def _append_entry(self, entry):
-        self._comment_entries.append(entry)
-        if (len(self._comment_entries) > self.MAX_COMMENT_ENTRIES + self.COMMENT_PRUNE_BATCH
-                and (not self.jump_to_latest.isVisible() or len(self._comment_entries) > 480)):
+        self._append_entries([entry])
+
+    def _append_entries(self, entries, unread=0):
+        scroll = self.comment_view.verticalScrollBar()
+        position = scroll.value()
+        follow = scroll.maximum() - position <= 4
+        self._comment_entries.extend(entries)
+        limit = self.MAX_COMMENT_ENTRIES + self.COMMENT_PRUNE_BATCH if follow else 480
+        if len(self._comment_entries) > limit:
             del self._comment_entries[:-self.MAX_COMMENT_ENTRIES]
             self._rerender_comment_entries()
-            return
-        self._render_entry(entry)
+        else:
+            self._rendering_chat = True
+            try:
+                for entry in entries:
+                    self._render_entry(entry)
+            finally:
+                self._rendering_chat = False
+        if follow:
+            self._scroll_chat_to_bottom()
+        else:
+            scroll.setValue(position)
+            self._chat_unread += unread
+            self.jump_to_latest.setText(f'View {self._chat_unread} new comments')
+            self.jump_to_latest.setVisible(self._chat_unread > 0)
 
     def _rerender_comment_entries(self):
         scroll = self.comment_view.verticalScrollBar()
@@ -1780,12 +1834,12 @@ class MainWindow(QMainWindow):
             return
         scroll = self.comment_view.verticalScrollBar()
         if scroll.maximum() - scroll.value() <= 4:
-            self._chat_has_updates = False
-        self.jump_to_latest.setVisible(self._chat_has_updates)
+            self._chat_unread = 0
+        self.jump_to_latest.setVisible(self._chat_unread > 0)
 
     def _scroll_chat_to_bottom(self):
         scroll = self.comment_view.verticalScrollBar()
-        self._chat_has_updates = False
+        self._chat_unread = 0
         self.jump_to_latest.hide()
         scroll.setValue(scroll.maximum())
 
@@ -1796,27 +1850,10 @@ class MainWindow(QMainWindow):
         self._render_system_message(entry['text'])
 
     def _append_rich_block(self, html):
-        scroll = self.comment_view.verticalScrollBar()
-        follow = scroll.maximum() - scroll.value() <= 4
         cursor = self.comment_view.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         cursor.insertHtml(html)
         cursor.insertBlock()
-        if self._rendering_chat:
-            return
-        if follow:
-            self._scroll_chat_to_bottom()
-        else:
-            self._chat_has_updates = True
-            self.jump_to_latest.show()
-
-    def _append_comment(self, name, text, comment):
-        self._append_entry({
-            'kind': 'comment',
-            'name': name,
-            'text': text,
-            'comment': dict(comment),
-        })
 
     def _render_comment(self, name, text, comment):
         identity, color_key = self._comment_identity(comment, name)

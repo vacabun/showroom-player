@@ -1,5 +1,5 @@
 APP_NAME = 'Showroom Player'
-APP_VERSION = 'v2.6.0-rc.2'
+APP_VERSION = 'v2.6.0-rc.3'
 REPOSITORY_OWNER = 'vacabun'
 REPOSITORY_NAME = 'showroom-player'
 RELEASES_URL = f'https://github.com/{REPOSITORY_OWNER}/{REPOSITORY_NAME}/releases'

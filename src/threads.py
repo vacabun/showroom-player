@@ -180,19 +180,34 @@ class SendCommentThread(QThread):
                 return
             resp = session.post(
                 'https://www.showroom-live.com/api/live/post_live_comment',
-                data={
+                json={
                     'csrf_token': csrf_token,
                     'live_id': self.live_id,
                     'comment': self.comment,
-                    'recommend_comment_id': '',
-                    'comment_type': '',
-                    'is_delay': '0',
+                    'recommend_comment_id': None,
+                    'comment_type': None,
+                    'is_delay': 0,
                 },
                 timeout=10,
             )
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get('ok') in (1, '1'):
+            try:
+                data = resp.json()
+            except ValueError:
+                resp.raise_for_status()
+                raise ValueError('SHOWROOM returned an unreadable response')
+            if not resp.ok:
+                errors = data.get('errors') if isinstance(data, dict) else None
+                if isinstance(errors, list):
+                    messages = [
+                        str(item.get('message') or item.get('error_type') or '')
+                        for item in errors if isinstance(item, dict)
+                    ]
+                    message = ' / '.join(filter(None, messages))
+                else:
+                    message = ''
+                self.error.emit(message or f'SHOWROOM rejected the comment (HTTP {resp.status_code})')
+                return
+            if data.get('ok') in (1, '1') or ('comment' in data and not data.get('errors')):
                 self.success.emit()
             else:
                 msg = data.get('message') or data.get('error') or 'Failed to post comment'
